@@ -14,7 +14,7 @@ from colabdesign.af.prep import prep_input_features
 import colabdesign.af.inputs as cd_inputs
 from colabdesign.af.alphafold.model.config import model_config
 from colabdesign.af.alphafold.model.data import get_model_haiku_params
-from alphafold.common.protein import to_pdb, from_prediction
+from salad.aflib.common.protein import to_pdb, from_prediction
 from flexcraft.sequence.aa_codes import reindex_aatype, decode_sequence, AF2_AA_CODE, PMPNN_AA_CODE
 
 
