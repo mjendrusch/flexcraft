@@ -1,9 +1,9 @@
 import numpy as np
 from typing import Dict
 
-from alphafold.common.protein import Protein, from_pdb_string
-from alphafold.model.all_atom_multimer import atom37_to_atom14
-from alphafold.model.geometry import Vec3Array
+from salad.aflib.common.protein import Protein, from_pdb_string
+from salad.aflib.model.all_atom_multimer import atom37_to_atom14
+from salad.aflib.model.geometry import Vec3Array
 
 def data_from_protein(protein: Protein):
     positions, atom_mask = atom37_to_atom14(
