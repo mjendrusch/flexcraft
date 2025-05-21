@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "salad @ https://github.com/mjendrusch/salad.git",
+    "salad @ git+https://github.com/mjendrusch/salad.git",
     "ColabDesign @ git+https://github.com/sokrypton/ColabDesign.git"
 ]
 
