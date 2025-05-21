@@ -1,13 +1,11 @@
 import numpy as np
 from typing import Dict
 
-from alphafold.common.protein import from_pdb_string
+from alphafold.common.protein import Protein, from_pdb_string
 from alphafold.model.all_atom_multimer import atom37_to_atom14
 from alphafold.model.geometry import Vec3Array
 
-def load_pdb(path: str) -> Dict[str, np.ndarray]:
-    with open(path, "rt") as f:
-        protein = from_pdb_string(f.read())
+def data_from_protein(protein: Protein):
     positions, atom_mask = atom37_to_atom14(
         protein.aatype,
         Vec3Array.from_array(protein.atom_positions),
@@ -23,6 +21,11 @@ def load_pdb(path: str) -> Dict[str, np.ndarray]:
         tie_weights=np.ones((protein.aatype.shape[0],), dtype=np.float32),
         mask=atom_mask.any(axis=1)
     )
+
+def load_pdb(path: str) -> Dict[str, np.ndarray]:
+    with open(path, "rt") as f:
+        protein = from_pdb_string(f.read())
+    return data_from_protein(protein)
 
 def strip_aa(data):
     return {

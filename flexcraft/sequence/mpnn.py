@@ -83,7 +83,7 @@ class EncLayer(hk.Module):
             num_hidden, num_hidden * 4, name=name + "_dense"
         )
 
-    def __call__(self, h_V, h_E, E_idx, mask_V=None, mask_attend=None):
+    def __call__(self, h_V, h_E, E_idx, mask_V=None, mask_attend=None, tie_info=None):
         """Parallel computation of full transformer layer"""
 
         h_EV = cat_neighbors_nodes(h_V, h_E, E_idx)
@@ -94,6 +94,12 @@ class EncLayer(hk.Module):
         if mask_attend is not None:
             h_message = jnp.expand_dims(mask_attend, -1) * h_message
         dh = jnp.sum(h_message, -2) / self.scale
+
+        # tie neighbour features across tied positions
+        if tie_info is not None:
+            dh_weighted = dh * tie_info["tie_weights"]
+            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)
+
         h_V = self.norm1(h_V + drop(dh, rate=self.dropout))
 
         dh = self.dense(h_V)
@@ -135,7 +141,7 @@ class DecLayer(hk.Module):
             num_hidden, num_hidden * 4, name=name + "_dense"
         )
 
-    def __call__(self, h_V, h_E, mask_V=None, mask_attend=None):
+    def __call__(self, h_V, h_E, mask_V=None, mask_attend=None, tie_info=None):
         """Parallel computation of full transformer layer"""
 
         # Concatenate h_V_i to h_E_ij
@@ -147,6 +153,11 @@ class DecLayer(hk.Module):
             h_message = jnp.expand_dims(mask_attend, -1) * h_message
         dh = jnp.sum(h_message, -2) / self.scale
 
+        # tie neighbour features across tied positions
+        if tie_info is not None:
+            dh_weighted = dh * tie_info["tie_weights"]
+            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)
+        
         h_V = self.norm1(h_V + drop(dh, rate=self.dropout))
 
         # Position-wise feedforward
@@ -361,6 +372,7 @@ class ProteinMPNN(hk.Module):
         k_neighbors=64,
         augment_eps=0.05,
         dropout=0.1,
+        tie_messages=False
     ):
         super(ProteinMPNN, self).__init__(name="protein_mpnn")
 
@@ -368,6 +380,7 @@ class ProteinMPNN(hk.Module):
         self.node_features = node_features
         self.edge_features = edge_features
         self.hidden_dim = hidden_dim
+        self.tie_messages = tie_messages
 
         # Featurization layers
         self.features = ProteinFeatures(
@@ -398,12 +411,19 @@ class ProteinMPNN(hk.Module):
         local = jnp.zeros((E.shape[0], E.shape[-1]))
         pair = self.W_e(E)
 
+        # tie messages
+        tie_info = None
+        if self.tie_messages and "tie_index" in data:
+            tie_info = dict(tie_index=data["tie_index"], tie_weights=data["tie_weights"])
+
         # encoder layers
         mask_attend = jnp.take_along_axis(
             data["mask"][:, None] * data["mask"][None, :], neighbours, 1
         )
         for layer in self.encoder_layers:
-            local, pair = layer(local, pair, neighbours, data["mask"], mask_attend)
+            local, pair = layer(local, pair, neighbours,
+                                data["mask"], mask_attend,
+                                tie_info=tie_info)
         h_V_prev = local
 
         def step(x, order, filled):
@@ -424,7 +444,7 @@ class ProteinMPNN(hk.Module):
                 local = x["local"][l]
                 h_ESV_decoder = cat_neighbors_nodes(local, h_ES, neighbours)
                 h_ESV = mask_bw[..., None] * h_ESV_decoder + h_EXV_encoder
-                local = layer(local, h_ESV, mask_V=data["mask"])
+                local = layer(local, h_ESV, mask_V=data["mask"], tie_info=tie_info)
                 # update
                 x["local"] = x["local"].at[l + 1].set(local)
 
