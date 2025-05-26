@@ -5,12 +5,14 @@ from salad.aflib.common.protein import Protein, from_pdb_string
 from salad.aflib.model.all_atom_multimer import atom37_to_atom14
 from salad.aflib.model.geometry import Vec3Array
 
+from flexcraft.data.data import DesignData
+
 def data_from_protein(protein: Protein):
     positions, atom_mask = atom37_to_atom14(
         protein.aatype,
         Vec3Array.from_array(protein.atom_positions),
         protein.atom_mask)
-    return dict(
+    return DesignData.from_dict(dict(
         aa=protein.aatype,
         atom_positions=positions.to_array(),
         atom_mask=atom_mask,
@@ -20,9 +22,9 @@ def data_from_protein(protein: Protein):
         tie_index=np.arange(protein.aatype.shape[0], dtype=np.int32),
         tie_weights=np.ones((protein.aatype.shape[0],), dtype=np.float32),
         mask=atom_mask.any(axis=1)
-    )
+    ))
 
-def load_pdb(path: str) -> Dict[str, np.ndarray]:
+def load_pdb(path: str):
     with open(path, "rt") as f:
         protein = from_pdb_string(f.read())
     return data_from_protein(protein)

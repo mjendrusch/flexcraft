@@ -14,12 +14,16 @@ from colabdesign.af.prep import prep_input_features
 import colabdesign.af.inputs as cd_inputs
 from colabdesign.af.alphafold.model.config import model_config
 from colabdesign.af.alphafold.model.data import get_model_haiku_params
-from alphafold.common.protein import to_pdb, from_prediction
-from flexcraft.sequence.aa_codes import reindex_aatype, decode_sequence, AF2_AA_CODE, PMPNN_AA_CODE
+from salad.aflib.common.protein import to_pdb, from_prediction
+import flexcraft.sequence.aa_codes as aas
 
 
 def make_af2(config, use_multimer=False):
     def inner(params, key, data):
+        if isinstance(data, DesignData):
+            data = AFInput.from_data(data)
+        if isinstance(data, AFInputs):
+            data = data.data
         return model.RunModel(
             config, None,
             recycle_mode=None,
@@ -96,8 +100,8 @@ def soft_sequence(
     return result
 
 def forbid_sequence(
-        data: jnp.ndarray) -> jnp.ndarray:
-    return data.at[AF2_AA_CODE.index("C")].set(0.0)
+        data: jnp.ndarray, value: float = 0.0) -> jnp.ndarray:
+    return data.at[aas.AF2_CODE.index("C")].set(value)
 
 def combined_sequence(
         target, # (N_target, 20)
@@ -122,7 +126,9 @@ def make_predict(model, num_recycle=4):
             return prev, results
         prev = af_data["prev"]
         if num_recycle > 0:
-            prev, _ = jax.lax.scan(jax.remat(body), prev, jax.random.split(key, num_recycle - 1))
+            prev, _ = jax.lax.scan(
+                jax.remat(body), prev,
+                jax.random.split(key, num_recycle - 1))
         af_data["prev"] = prev
         return model(params, key, af_data)
     return inner
@@ -163,6 +169,13 @@ class AFResult:
     @property
     def pae(self):
         return self._mean_of_binned("predicted_aligned_error", has_edges=False)
+    
+    @property
+    def ipae(self):
+        pae = self.pae
+        chain = self.inputs["asym_id"]
+        other_chain = chain[:, None] != chain[None, :]
+        return (pae * other_chain).sum() / jnp.maximum(1, other_chain.sum())
 
     @property
     def distance(self):
@@ -186,7 +199,7 @@ class AFResult:
         edge_mask = bin_edges[1:] < contact_distance
         distogram_clipped = jax.nn.softmax(distogram - 1e9 * (1 - edge_mask), axis=-1)
         distogram_clipped = jnp.where(edge_mask, distogram_clipped, 0)
-        return (distogram_clipped * distogram).sum(axis=-1)
+        return -(distogram_clipped * distogram).sum(axis=-1)
 
     def save_pdb(self, path):
         _save_af_pdb(path, self)
@@ -260,7 +273,7 @@ if __name__ == "__main__":
                 toggle_transform(
                     center_logits(center=center), use=opt.center == "True"),
                 scale_by_temperature(temperature=opt.temperature),
-                #forbid("C", PMPNN_AA_CODE),
+                #forbid("C", aas.PMPNN_CODE),
                 norm_logits
             ])
             sampler = sample(pmpnn, logit_transform=transform)
@@ -272,10 +285,10 @@ if __name__ == "__main__":
             for idx in range(opt.samples):
                 # data = strip_aa(data)
                 result, log_p = sampler(key(), data)
-                data["aa"] = reindex_aatype(result["aa"], PMPNN_AA_CODE, AF2_AA_CODE)
+                data["aa"] = aas.translate(result["aa"], aas.PMPNN_CODE, aas.AF2_CODE)
                 score = -pmpnn(key(), data)["logits"][jnp.arange(num_aa), data["aa"]].mean()
                 print(f"Designed sequence {idx}:")
-                sequence = decode_sequence(data["aa"], AF2_AA_CODE)
+                sequence = aas.decode(data["aa"], aas.AF2_CODE)
                 print(sequence)
                 features = make_af_data(data)
                 result = AFResult(inputs=features,
@@ -288,7 +301,7 @@ if __name__ == "__main__":
                     data = strip_aa(data)
                     prev_aa = data["aa"]
                 else:
-                    data["aa"] = reindex_aatype(data["aa"], AF2_AA_CODE, PMPNN_AA_CODE)
+                    data["aa"] = aas.translate(data["aa"], aas.AF2_CODE, aas.PMPNN_CODE)
                     data["aa"] = jnp.where(lddt <= bad_plddt, 20, data["aa"])
                 pae = result.pae.mean()
                 if plddt > best_plddt:

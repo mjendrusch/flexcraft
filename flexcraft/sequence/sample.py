@@ -117,7 +117,7 @@ def norm_logits(logits, data):
 
 if __name__ == "__main__":
     from flexcraft.sequence.mpnn import make_pmpnn
-    from flexcraft.sequence.aa_codes import PMPNN_AA_CODE, AF2_AA_CODE, decode_sequence
+    import flexcraft.sequence.aa_codes as aas
     from flexcraft.utils import Keygen, parse_options, load_pdb, strip_aa, tie_homomer
 
     opt = parse_options(
@@ -144,7 +144,7 @@ if __name__ == "__main__":
         toggle_transform(
             center_logits(center=center), use=opt.center == "True"),
         scale_by_temperature(temperature=opt.temperature),
-        #forbid("C", PMPNN_AA_CODE),
+        #forbid("C", aas.PMPNN_CODE),
         norm_logits
     ])
     sampler = sample(model, logit_transform=transform)
@@ -157,4 +157,4 @@ if __name__ == "__main__":
         logprobs = logits[jnp.arange(result["aa"].shape[0]), result["aa"]]
         perplexity = np.exp(-logprobs.mean())
         print(f"> {float(perplexity):.2f} {float(np.exp(-log_p / result['aa'].shape[0])):.2f}")
-        print(decode_sequence(result["aa"], PMPNN_AA_CODE)[:data["aa"].shape[0] // opt.homomer])
+        print(aas.decode(result["aa"], aas.PMPNN_CODE)[:data["aa"].shape[0] // opt.homomer])
