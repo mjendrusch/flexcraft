@@ -10,11 +10,17 @@ import haiku as hk
 
 import salad.inference as si
 
+import flexcraft.sequence.aa_codes as aas
 from flexcraft.sequence.mpnn import make_pmpnn
 from flexcraft.sequence.sample import *
-from flexcraft.sequence.aa_codes import PMPNN_AA_CODE, AF2_AA_CODE, decode_sequence
 from flexcraft.structure.af import *
-from flexcraft.utils import Keygen, parse_options, strip_aa, data_from_protein
+from flexcraft.utils import Keygen, parse_options, data_from_protein
+from flexcraft.files.pdb import PDBFile
+from flexcraft.tools.boltz import BoltzYAML
+
+from flexcraft.rosetta.relax import fastrelax
+import pyrosetta as pr
+from flexcraft.structure.metrics import RMSD
 
 # here, we implement a denoising step
 def model_step(config):
@@ -65,6 +71,9 @@ opt = parse_options(
 )
 os.makedirs(opt.out_path, exist_ok=True)
 
+# initialize pyrosetta
+pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -corrections::beta_nov16 true -relax:default_repeats 1')
+
 key = Keygen(opt.seed)
 pmpnn = jax.jit(make_pmpnn(opt.pmpnn_params, eps=0.05))
 
@@ -100,35 +109,44 @@ for idx in range(opt.num_designs):
     design = sampler(salad_params, key(), salad_data, init_prev)
     print(f"Design {idx} in {time.time() - start:.2f} s")
     # convert it to ProteinMPNN input
-    pmpnn_data = data_from_protein(si.data.to_protein(design))
-    pmpnn_data = strip_aa(pmpnn_data)
+    pmpnn_data = data_from_protein(
+        si.data.to_protein(design)).drop_aa()
     step_0_logits = pmpnn(key(), pmpnn_data)["logits"]
     center = step_0_logits.mean(axis=0)
     # ensure one TRP/W residue
-    p_W = jax.nn.softmax(step_0_logits - center)[:, PMPNN_AA_CODE.index("W")]
+    p_W = jax.nn.softmax(step_0_logits - center)[:, aas.PMPNN_CODE.index("W")]
     best_W = jnp.argmax(p_W, axis=0)
     # set up logit transform
     transform = transform_logits([
         toggle_transform(
             center_logits(center=center), use=opt.center == "True"),
         scale_by_temperature(temperature=opt.temperature),
-        forbid("C", PMPNN_AA_CODE),
+        forbid("C", aas.PMPNN_CODE),
         norm_logits
     ])
     pmpnn_sampler = sample(pmpnn, logit_transform=transform)
     for ids in range(opt.num_samples):
-        pmpnn_data = strip_aa(pmpnn_data)
+        pmpnn_data = pmpnn_data.drop_aa()
         # ensure one TRP/W residue (at the most probable position)
-        pmpnn_data["aa"][best_W] = PMPNN_AA_CODE.index("W")
+        pmpnn_data["aa"] = pmpnn_data["aa"].at[best_W].set(
+            aas.PMPNN_CODE.index("W"))
         # sample all other residues
         result, log_p = pmpnn_sampler(key(), pmpnn_data)
-        pmpnn_data["aa"] = reindex_aatype(result["aa"], PMPNN_AA_CODE, AF2_AA_CODE)
-        sequence = decode_sequence(pmpnn_data["aa"], AF2_AA_CODE)
-        af_data = make_af_data(pmpnn_data)
-        result = AFResult(inputs=af_data,
-                          result=af2(af2_params, key(), af_data))
+        # ProteinMPNN has a different amino acid order than AF2
+        # translate the amino acid order
+        pmpnn_data["aa"] = aas.translate(result["aa"], aas.PMPNN_CODE, aas.AF2_CODE)
+        sequence = aas.decode(pmpnn_data["aa"], aas.AF2_CODE)
+        af_data = AFInput.from_data(pmpnn_data).add_guess(pmpnn_data).add_pos(pmpnn_data)
+        result = af2(af2_params, key(), af_data)
         plddt = result.plddt.mean()
-        print(idx, ids, sequence, plddt)
-        if plddt > 0.8:
-            result.save_pdb(f"{opt.out_path}/result_{idx}.pdb")
+        sc_rmsd = RMSD(atoms=["CA"])(result.to_data(), pmpnn_data)
+        print(idx, ids, sequence, plddt, sc_rmsd)
+        BoltzYAML(result.to_data(), path="tmp/boltz.yaml")
+        if plddt > 0.8 and sc_rmsd < 2.0:
+            pdb = PDBFile(
+                result.to_data(),
+                path=f"{opt.out_path}/result_{idx}.pdb")
+            relaxed = fastrelax(pdb, f"{os.path.dirname(opt.out_path + '/')}_relaxed/result_{idx}.pdb")
+            relax_rmsd = RMSD(atoms=["CA"])(pdb.to_data(), relaxed.to_data(), mask=None)
+            print(f"relaxed RMSD {relax_rmsd:.2f} A")
             break
