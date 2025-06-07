@@ -20,7 +20,21 @@ class DesignData:
     def from_blocks(cls, blocks: Any) -> "DesignData":
         data = dict() # TODO
         return DesignData(data=data)
-    
+
+    @classmethod
+    def from_length(cls, length):
+        return DesignData.from_dict(dict(
+            aa=jnp.full((length,), 20, dtype=jnp.int32),
+            atom_positions=jnp.zeros((length, 14, 3), dtype=jnp.float32),
+            atom_mask=jnp.zeros((length, 14), dtype=jnp.bool_),
+            residue_index=jnp.arange(length, dtype=jnp.int32),
+            chain_index=jnp.zeros((length,), dtype=jnp.int32),
+            batch_index=jnp.zeros((length,), dtype=jnp.int32),
+            tie_index=jnp.arange(length, dtype=jnp.int32),
+            tie_weights=jnp.ones((length,), dtype=jnp.float32),
+            mask=jnp.ones((length,), dtype=jnp.bool_)
+        ))
+
     @classmethod
     def from_dict(cls, data: dict) -> "DesignData":
         return DesignData(data=data)
@@ -112,9 +126,10 @@ class DesignData:
             result.data[k] = v
         return result
 
-    def drop_aa(self) -> "DesignData":
+    def drop_aa(self, where = True) -> "DesignData":
         if self.aa is not None:
-            return self.update(aa=jnp.full_like(self.aa, 20))
+            return self.update(
+                aa=jnp.where(where, jnp.full_like(self.aa, 20), self.aa))
         return self.copy()
 
     def copy(self) -> "DesignData":
@@ -128,24 +143,32 @@ class DesignData:
 
     @classmethod
     def concatenate(cls: "type[DesignData]",
-                    items: Iterable["DesignData"],
-                    sep_chains=True) -> "DesignData":
+                    items: List["DesignData"],
+                    sep_chains=True,
+                    sep_batch=False) -> "DesignData":
         result = DesignData(
             data=concatenate_dict([
                 item.data for item in items], axis=0))
         if sep_chains:
-            chains = []
-            offset = 0
-            for item in items:
-                chains.append(item.chain_index + offset)
-                offset += chains[-1].max()
-            result.data["chain_index"] = jnp.concatenate(chains, axis=0)
+            result.data["chain_index"] = _sep_groups([c.chain_index for c in items])
+        if sep_batch and "batch_index" in items[0].data:
+            result.data["batch_index"] = _sep_groups([c["batch_index"] for c in items])
         return result
 
+    def untie(self) -> "DesignData":
+        return self.update(tie_index=jnp.arange(self["tie_index"].shape[0]))
+
     def __add__(self, other: "DesignData") -> "DesignData":
-        return type(self).concatenate([self, other], sep_chains=False)
+        """Concatenation of chain fragments combines them into a single chain
+        with consecutive residue indices."""
+        result = type(self).concatenate([self, other], sep_chains=False)
+        result = result.update(
+            chain_index=jnp.zeros_like(result.chain_index),
+            residue_index=jnp.arange(result.residue_index.shape[0], dtype=jnp.int32))
+        return result
 
     def __truediv__(self, other: "DesignData") -> "DesignData":
+        """Complex of chains with consecutive chain indices."""
         return type(self).concatenate([self, other], sep_chains=True)
 
     def to_protein(self, b_factors=None):
@@ -176,6 +199,14 @@ def concatenate_dict(items: List[dict], axis=0) -> dict:
     return {k: jnp.concatenate([
         item[k] for item in items], axis=axis)
         for k in items[0]}
+
+def _sep_groups(indices):
+    result = []
+    offset = 0
+    for item in indices:
+        result.append(item + offset)
+        offset += result[-1].max() + 1
+    return jnp.concatenate(result, axis=0)
 
 # # testing stuff
 # def make_step(blocks):

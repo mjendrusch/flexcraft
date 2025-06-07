@@ -1,7 +1,7 @@
 import os
 import shutil
 import time
-import hashlib
+import uuid
 
 from flexcraft.utils import load_pdb
 from flexcraft.data.data import DesignData
@@ -11,9 +11,9 @@ class PDBFile:
         self.prefix = prefix
         if tmpdir is None:
             tmpdir = "tmp/"
-        if path is None:
-            path = self.get_tmp_path()
         self.tmpdir = tmpdir
+        if path is None:
+            path = self.get_tmp_path(prefix=prefix, tmpdir=tmpdir)
         self.path = path
         self.writable = False
         if data is None:
@@ -23,11 +23,12 @@ class PDBFile:
             data.save_pdb(path)
         self.data = data
 
-    def get_tmp_path(self):
-        name = str(hashlib.sha1(str(time.time()).encode()).hexdigest())[:8]
-        if self.prefix:
-            name = f"{self.prefix}_{name}"
-        return f"{self.tmpdir}/{name}.pdb"
+    @staticmethod
+    def get_tmp_path(prefix="", tmpdir="tmp/"):
+        name = str(uuid.uuid4())
+        if prefix:
+            name = f"{prefix}_{name}"
+        return f"{tmpdir}/{name}.pdb"
 
     def to_data(self):
         return self.data
@@ -35,7 +36,8 @@ class PDBFile:
     def clean(self):
         if not os.path.exists(self.tmpdir):
             os.makedirs(self.tmpdir)
-        tmp_path = self.get_tmp_path()
+        tmp_path = self.get_tmp_path(
+            prefix=self.prefix, tmpdir=self.tmpdir)
         relevant_tags = ('ATOM', 'END', 'HETATM', 'LINK', 'MODEL', 'TER')
         with open(self.path, 'r') as f_in, open(tmp_path, 'wt') as f_out:
             for line in f_in:

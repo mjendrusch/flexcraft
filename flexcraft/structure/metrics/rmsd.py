@@ -29,4 +29,5 @@ class RMSD:
         params = index_kabsch(
             x, y, index, mask)
         x_p = apply_alignment(x, params)
-        return jnp.sqrt(((y - x_p) ** 2).mean())
+        return jnp.sqrt(jnp.where(
+            mask[:, None], (y - x_p) ** 2, 0).mean())

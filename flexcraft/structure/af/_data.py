@@ -10,6 +10,7 @@ from chex import Array
 import tree
 
 from colabdesign.af.alphafold.model.geometry import Vec3Array
+from colabdesign.af.alphafold.model.modules import pseudo_beta_fn
 from colabdesign.af.alphafold.model.all_atom_multimer import atom14_to_atom37, atom37_to_atom14
 from colabdesign.af.prep import prep_input_features
 import colabdesign.af.inputs as cd_inputs
@@ -75,6 +76,64 @@ class AFInput:
             positions, self.data["aatype"])
         return result
 
+    def block_diagonal(self, num_sequences=2):
+        chain = self.data["asym_id"]
+        chain = jnp.unique(chain, size=num_sequences, return_inverse=True)[1]
+        gap_seq = jax.nn.one_hot(jnp.full_like(chain, 21), 22)
+        select = jax.nn.one_hot(chain, num_sequences, axis=0) > 0
+        gap_feat = jnp.zeros_like(
+            self.data["msa_feat"][0]).at[..., 0:22].set(gap_seq).at[..., 25:47].set(gap_seq)
+        msa_feat = self.data["msa_feat"]
+        msa_feat = jnp.where(select[..., None], msa_feat, gap_feat[None])
+        result = copy(self)
+        result.data = {k: v for k, v in result.data.items()}
+        result.data["msa_feat"] = msa_feat
+        result.data["msa_mask"] = jnp.ones((num_sequences, chain.shape[0]), dtype=jnp.bool_)
+        result.data["msa_row_mask"] = jnp.ones((num_sequences,), dtype=jnp.bool_)
+        return result
+
+    def add_template(self,
+                     data: DesignData | None = None,
+                     pos: Array | None = None,
+                     pos_mask: Array | None = None,
+                     aa: Array | None = None,
+                     where: Array = True):
+        where = jnp.array(where, dtype=jnp.bool_)
+        if data is not None:
+            positions = data["atom_positions"]
+            position_mask = data["atom_mask"]
+            aa = data["aa"]
+            where = where * data["atom_mask"].any(axis=1)
+        else:
+            if pos is not None:
+                positions = self.data["atom_positions"]
+                position_mask = pos_mask
+            if aa is None:
+                aa = self.data["aatype"]
+            else:
+                aa = jnp.broadcast_to(aa, self.data["aatype"].shape)
+        if self.data["template_mask"].all():
+            self.data.update(_add_template(self.data))
+        positions = atom14_to_atom37(positions, aa)
+        position_mask = atom14_to_atom37(position_mask, aa)
+        atom_where = position_mask * where[:, None]
+        atom_where = atom_where.at[..., 5:].set(0)
+        pseudo_beta, pseudo_where = pseudo_beta_fn(aa, positions, atom_where)
+        af_input = _init_template(self.data)
+        update = dict(
+            template_mask = af_input["template_mask"].at[-1].set(1),
+            template_aatype = af_input["template_aatype"].at[-1].set(jnp.where(where, aa, 20)),
+            template_all_atom_positions = af_input["template_all_atom_positions"].at[-1].set(positions),
+            template_all_atom_mask = af_input["template_all_atom_mask"].at[-1].set(atom_where),
+            template_pseudo_beta = af_input["template_pseudo_beta"].at[-1].set(pseudo_beta),
+            template_pseudo_beta_mask = af_input["template_pseudo_beta_mask"].at[-1].set(where),
+        )
+        result = copy(self)
+        result.pos_init = True
+        result.data = copy(result.data)
+        result.data.update(update)
+        return result
+
     def update_templates(self, data: Any) -> "AFInput":
         result = AFInput(
             prev_init=self.prev_init, pos_init=self.pos_init,
@@ -94,6 +153,35 @@ class AFInput:
     def to_data(self) -> Any:
         return ... # TODO
 
+def _init_template(data):
+    return {
+        key: jnp.asarray(data[key])
+        for key in (
+            'template_aatype',
+            'template_all_atom_mask',
+            'template_all_atom_positions',
+            'template_mask',
+            'template_pseudo_beta',
+            'template_pseudo_beta_mask'
+        )
+    }
+
+def _add_template(data):
+    return {
+        key: _extend_array(data[key], axis=0)
+        for key in (
+            'template_aatype',
+            'template_all_atom_mask',
+            'template_all_atom_positions',
+            'template_mask',
+            'template_pseudo_beta',
+            'template_pseudo_beta_mask'
+        )
+    }
+
+def _extend_array(data: Array, axis=0):
+    return jnp.concatenate((data, jnp.zeros_like(data[:1])), axis=axis)
+
 def _af_input_from_sequence(sequence):
     L = sequence.shape[0]
     result = prep_input_features(L=L)
@@ -111,13 +199,15 @@ def _af_input_from_sequence(sequence):
     result["use_dropout"] = False
     return result
 
+
 def _af_input_from_data(data: DesignData):
     seq_one_hot = jax.nn.one_hot(data.aa, 20, axis=-1)
     if "aa_one_hot" in data:
         seq_one_hot: Array = data["aa_one_hot"]
     L = seq_one_hot.shape[0]
     result = _af_input_from_sequence(seq_one_hot)
-    result["residue_index"] = data["residue_index"]
+    result["residue_index"] = _chain_residue_index(
+        data["residue_index"], data["chain_index"])
     result["asym_id"] = result["sym_id"] = data["chain_index"]
     result["entity_id"] = tie_blocks(data)
     result["mask_template_interchain"] = False
@@ -130,9 +220,12 @@ def _af_input_from_data(data: DesignData):
 def tie_blocks(data):
     if "tie_blocks" in data:
         return data["tie_blocks"]
+    
     tie_index = data["tie_index"]
-    store = np.full_like(tie_index, -1)
-    store[tie_index] = data["chain_index"]
+    tie_index = jnp.unique(tie_index, return_inverse=True,
+                           size=tie_index.shape[0])[1]
+    store = jnp.full_like(tie_index, -1)
+    store = store.at[tie_index].set(data["chain_index"])
     return store[tie_index]
 
 def _update_sequence(features, one_hot):
@@ -140,6 +233,14 @@ def _update_sequence(features, one_hot):
     cd_inputs.update_seq(one_hot[None], features)
     cd_inputs.update_aatype(jnp.argmax(one_hot, axis=-1), features)
     return features
+
+def _chain_residue_index(residue_index, chain_index):
+    consecutive_index = jnp.arange(residue_index.shape[0], dtype=jnp.int32)
+    chain_break_index = jnp.concatenate((
+        jnp.zeros((1,), dtype=jnp.int32),
+        chain_index[1:] != chain_index[:-1]), axis=0)
+    offset = jnp.cumsum(chain_break_index, axis=0)
+    return consecutive_index + 50 * offset
 
 @chex.dataclass(mappable_dataclass=False)
 class AFResult:

@@ -16,10 +16,16 @@ from pyrosetta.rosetta.core.kinematics import MoveMap
 from pyrosetta.rosetta.protocols.simple_moves import AlignChainMover
 from pyrosetta.rosetta.protocols.relax import FastRelax
 from flexcraft.files.pdb import PDBFile
+from flexcraft.data.data import DesignData
 
-def fastrelax(pdb_file: str | PDBFile, relaxed_pdb_path: str):
+def fastrelax(pdb_file: str | PDBFile | DesignData,
+              relaxed_pdb_path: str | None=None, tmpdir=None):
     if isinstance(pdb_file, PDBFile):
         pdb_file = pdb_file.path
+    if isinstance(pdb_file, DesignData):
+        pdb_file = PDBFile(pdb_file, tmpdir=tmpdir).path
+    if relaxed_pdb_path is None:
+        relaxed_pdb_path = PDBFile.get_tmp_path(prefix="relaxed", tmpdir=tmpdir)
     if relaxed_pdb_path and not os.path.isdir(os.path.dirname(relaxed_pdb_path)):
         os.makedirs(os.path.dirname(relaxed_pdb_path))
 
