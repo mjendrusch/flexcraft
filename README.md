@@ -4,21 +4,15 @@ Very, very experimental attempt at a library for plugging together single-script
 This aspires to become a library that helps write tools like BindCraft, but for arbitrary protein design tasks.
 At the moment, it is still very far away from that state and is very much **work in progress**, the API **will** change.
 
-The only reason this is a public repository is because I want to experiment with it in Google Colab, which necessitates
-having 
+The only reason this is a public repository is because I want to experiment with it in Google Colab.
 
 ## Installation
 Installation is not polished yet, might require some fiddling with packages.
 ```
 conda create -n flexcraft python=3.10
 conda activate flexcraft
-git clone https://github.com/mjendrusch/salad.git
-cd salad
-pip install -e .
 wget https://zenodo.org/records/14711580/files/salad_params.tar.gz
 tar -xzf salad_params.tar.gz
-cd ..
-pip install git+https://github.com/sokrypton/ColabDesign.git
 git clone https://github.com/mjendrusch/flexcraft.git
 cd flexcraft
 pip install -e .
