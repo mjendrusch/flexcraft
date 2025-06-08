@@ -20,7 +20,7 @@ from flexcraft.tools.boltz import BoltzYAML
 
 from flexcraft.rosetta.relax import fastrelax
 import pyrosetta as pr
-from flexcraft.structure.metrics import RMSD
+from flexcraft.structure.metrics import RMSD, sc_lddt, lddt
 
 # here, we implement a denoising step
 def model_step(config):
@@ -75,7 +75,19 @@ os.makedirs(opt.out_path, exist_ok=True)
 pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -corrections::beta_nov16 true -relax:default_repeats 1')
 
 key = Keygen(opt.seed)
+# set up ProteinMPNN
 pmpnn = jax.jit(make_pmpnn(opt.pmpnn_params, eps=0.05))
+# set up logit transform
+transform = lambda center, T: transform_logits([
+    toggle_transform(
+        center_logits(center=center), use=opt.center == "True"),
+    scale_by_temperature(temperature=T),
+    forbid("C", aas.PMPNN_CODE),
+    norm_logits
+])
+# set up sampler
+pmpnn_sampler = lambda center, T: sample(
+    pmpnn, logit_transform=transform(center, T))
 
 # make salad model
 salad_config, salad_params = si.make_salad_model("default_vp", opt.salad_params)
@@ -106,6 +118,9 @@ print("Starting design...")
 for idx in range(opt.num_designs):
     # generate a structure in each step
     start = time.time()
+    salad_data["dssp_condition"], dssp_string = si.random_dssp(
+        num_aa, p=0.0, return_string=True)
+    print(dssp_string)
     design = sampler(salad_params, key(), salad_data, init_prev)
     print(f"Design {idx} in {time.time() - start:.2f} s")
     # convert it to ProteinMPNN input
@@ -116,22 +131,17 @@ for idx in range(opt.num_designs):
     # ensure one TRP/W residue
     p_W = jax.nn.softmax(step_0_logits - center)[:, aas.PMPNN_CODE.index("W")]
     best_W = jnp.argmax(p_W, axis=0)
-    # set up logit transform
-    transform = transform_logits([
-        toggle_transform(
-            center_logits(center=center), use=opt.center == "True"),
-        scale_by_temperature(temperature=opt.temperature),
-        forbid("C", aas.PMPNN_CODE),
-        norm_logits
-    ])
-    pmpnn_sampler = sample(pmpnn, logit_transform=transform)
+    #pmpnn_sampler = sample(pmpnn, logit_transform=transform(center, opt.temperature))
     for ids in range(opt.num_samples):
+        # anneal temperature
+        T = 1 - ids / opt.num_samples
+        # prepare input
         pmpnn_data = pmpnn_data.drop_aa()
         # ensure one TRP/W residue (at the most probable position)
         pmpnn_data["aa"] = pmpnn_data["aa"].at[best_W].set(
             aas.PMPNN_CODE.index("W"))
         # sample all other residues
-        result, log_p = pmpnn_sampler(key(), pmpnn_data)
+        result, log_p = pmpnn_sampler(center, T)(key(), pmpnn_data)
         # ProteinMPNN has a different amino acid order than AF2
         # translate the amino acid order
         pmpnn_data["aa"] = aas.translate(result["aa"], aas.PMPNN_CODE, aas.AF2_CODE)
@@ -139,12 +149,15 @@ for idx in range(opt.num_designs):
         af_data = AFInput.from_data(pmpnn_data).add_guess(pmpnn_data).add_pos(pmpnn_data)
         result = af2(af2_params, key(), af_data)
         plddt = result.plddt.mean()
+        lddt_mean = lddt(result, pmpnn_data).mean()
+        residue_sc_lddt = sc_lddt(result, pmpnn_data)
+        sc_lddt_mean = residue_sc_lddt.mean()
         sc_rmsd = RMSD(atoms=["CA"])(result.to_data(), pmpnn_data)
-        print(idx, ids, sequence, plddt, sc_rmsd)
+        print(idx, ids, sequence, plddt, lddt_mean, sc_lddt_mean, sc_rmsd)
         BoltzYAML(result.to_data(), path="tmp/boltz.yaml")
-        if plddt > 0.8 and sc_rmsd < 2.0:
+        if sc_lddt_mean > 0.7:#plddt > 0.8 and sc_rmsd < 2.0:
             pdb = PDBFile(
-                result.to_data(),
+                result.to_data().update(plddt=residue_sc_lddt),
                 path=f"{opt.out_path}/result_{idx}.pdb")
             relaxed = fastrelax(pdb, f"{os.path.dirname(opt.out_path + '/')}_relaxed/result_{idx}.pdb")
             relax_rmsd = RMSD(atoms=["CA"])(pdb.to_data(), relaxed.to_data(), mask=None)

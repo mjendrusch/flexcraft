@@ -3,14 +3,13 @@ import time
 import jax
 from colabdesign.af.alphafold.model.config import model_config
 from colabdesign.af.alphafold.model.data import get_model_haiku_params
-from alphafold.common.protein import to_pdb, from_prediction
+from salad.aflib.common.protein import to_pdb, from_prediction
 
 from flexcraft.utils.options import parse_options
 from flexcraft.utils.rng import Keygen
 from flexcraft.utils import Keygen, parse_options, load_pdb, strip_aa, tie_homomer
 from flexcraft.sequence.sample import *
 from flexcraft.sequence.mpnn import make_pmpnn
-from flexcraft.sequence.aa_codes import reindex_aatype, decode_sequence, AF2_AA_CODE, PMPNN_AA_CODE
 from flexcraft.structure.af import soft_sequence, forbid_sequence, af_data_from_sequence, AFResult, make_af2, make_predict
 # from colabdesign.af.alphafold.common.protein import from_prediction, to_pdb
 opt = parse_options(
