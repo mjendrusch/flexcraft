@@ -1,3 +1,5 @@
+import os
+
 try:
     import pyrosetta as pr
 except ImportError:
@@ -21,10 +23,12 @@ def get_sasa(pose):
     return sum(rsd_sasa), sum(rsd_hydrophobic_sasa)
 
 def sap_per_residue(pdb_file, tmpdir=None):
+    cleanup = False
     if isinstance(pdb_file, PDBFile):
         pdb_file = pdb_file.path
     if isinstance(pdb_file, DesignData):
         pdb_file = PDBFile(pdb_file, tmpdir=tmpdir).path
+        cleanup = True
     pose = pr.pose_from_file(pdb_file)
     true_sel = (
         pr.rosetta.core.select.residue_selector.TrueResidueSelector()
@@ -39,6 +43,9 @@ def sap_per_residue(pdb_file, tmpdir=None):
 
     no_res = len(pose.sequence())
     sap_per_res = total_sap_score / float(no_res)
+    
+    if cleanup:
+        os.remove(pdb_file)
 
     # rsd_sasa, rsd_hydrophobic_sasa = get_sasa(pose)
     # rsd_sasa_per_res = rsd_sasa / float(no_res)
