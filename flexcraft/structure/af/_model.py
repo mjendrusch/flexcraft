@@ -1,3 +1,5 @@
+"""This model wraps ColabDesign's AF2 to consume AFInputs and return AFResults."""
+
 from copy import copy
 import chex
 
@@ -21,6 +23,7 @@ from flexcraft.structure.af._data import AFInput, AFResult
 
 
 def make_af2(config, use_multimer=False):
+    """Construct an AlphaFold model given a configuration."""
     def inner(params, key, data):
         return model.RunModel(
             config, None,
@@ -66,6 +69,7 @@ def combined_sequence(
     ], axis=0)
 
 def make_predict(model, num_recycle=4):
+    """Wrap AlphaFold 2 to use DesignData or AFInput inputs and return AFResult."""
     def inner(params, key, data):
         def body(prev, subkey):
             results = model(params, subkey, data)
@@ -148,7 +152,7 @@ if __name__ == "__main__":
                 af_data = data.update(
                     aa=aas.translate(result["aa"], aas.PMPNN_CODE, aas.AF2_CODE))
                 print(f"Designed sequence {idx}:")
-                sequence = decode_sequence(af_data.aa, aas.AF2_CODE)
+                sequence = aas.decode(af_data.aa, aas.AF2_CODE)
                 print(sequence)
                 features = AFInput.from_data(af_data).add_guess(af_data)
                 result: AFResult = predictor(params, key(), features)

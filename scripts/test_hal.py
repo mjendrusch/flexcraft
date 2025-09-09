@@ -10,7 +10,7 @@ from flexcraft.utils.rng import Keygen
 from flexcraft.utils import Keygen, parse_options, load_pdb, strip_aa, tie_homomer
 from flexcraft.sequence.sample import *
 from flexcraft.sequence.mpnn import make_pmpnn
-from flexcraft.structure.af import soft_sequence, forbid_sequence, af_data_from_sequence, AFResult, make_af2, make_predict
+from flexcraft.structure.af import soft_sequence, forbid_sequence, AFInput, AFResult, make_af2, make_predict
 # from colabdesign.af.alphafold.common.protein import from_prediction, to_pdb
 opt = parse_options(
     "predict structures with AlphaFold",
@@ -25,6 +25,7 @@ opt = parse_options(
     samples=10,
     seed=42
 )
+# set up alphafold model
 params = get_model_haiku_params(
     model_name=opt.model_name,
     data_dir=opt.param_path, fuse=True)
@@ -35,23 +36,18 @@ af2 = make_predict(make_af2(config), num_recycle=2)
 key = Keygen(opt.seed)
 pmpnn = jax.jit(make_pmpnn(opt.pmpnn_path, eps=0.05))
 
+# fitness function for hallucination
 def fitness(params, key, sequence, soft=0.0, hard=0.0, T=1.0):
     sequence = soft_sequence(sequence, soft=soft, hard=hard, temperature=T)
     sequence = forbid_sequence(sequence, value=0)
     repeat = jnp.concatenate(opt.repeat * [sequence], axis=0)
-    data = af_data_from_sequence(repeat)
-    result = AFResult(inputs=data,
-                      result=af2(params, key, data))
-    # data = PMPNNData.from_flex(result.to_flex())
-    # data = pmpnn.strip_aa(data)
-    # pmpnn(data)
+    data = AFInput.from_sequence(repeat)
+    result = af2(params, key, data)
     resi = result.inputs["residue_index"]
     close = abs(resi[:, None] - resi[None, :]) < 10
     contact = result.contact_entropy(contact_distance=14.0)
     contact = jnp.where(close, 1e6, contact)
-    top_index = jnp.argsort(contact, axis=1)[:, :2]
-    index = jnp.arange(resi.shape[0])
-    contact_sum = -(contact[index[:, None], top_index]).mean()
+    contact_sum = -contact.sort(axis=1)[:, :2].mean()
     metrics = dict(result=result,
                    pae=result.pae.mean(),
                    plddt=result.plddt.mean(),
@@ -71,7 +67,7 @@ gradient_step = jax.jit(gradient_step)
 
 os.makedirs(opt.out_path, exist_ok=True)
 sequence = jax.nn.softmax(
-    forbid_sequence(jax.random.gumbel(key(), (opt.length, 20)), -1e9))#0.1 * jax.random.normal(key(), (opt.length, 20))
+    forbid_sequence(jax.random.gumbel(key(), (opt.length, 20)), -1e9))
 best = -1e6
 result = None
 for idx in range(100):
@@ -79,7 +75,6 @@ for idx in range(100):
     soft = 0.0#1 - t
     start = time.time()
     sequence, value, aux = gradient_step(params, key(), sequence, soft=soft)
-    # aux["result"].to_ir()
     print(f"Scores at step {idx} in {time.time() - start:.1f} s", 
           f"fitness: {value:.2f}", f"pae: {aux['pae']:.2f}",
           f"plddt: {aux['plddt']:.2f}", f"contact: {aux['pcontact']:.2f}")

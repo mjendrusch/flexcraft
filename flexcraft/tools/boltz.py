@@ -1,3 +1,4 @@
+"""Experimental Boltz predictor implementation."""
 
 import os
 

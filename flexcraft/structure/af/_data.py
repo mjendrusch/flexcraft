@@ -1,3 +1,5 @@
+"""This module implements AlphaFold2 input (AFInput) and result (AFResult) dataclasses."""
+
 from copy import copy
 from typing import Any, Optional
 
@@ -21,6 +23,7 @@ from flexcraft.data.data import DesignData
 
 @chex.dataclass(mappable_dataclass=False)
 class AFInput:
+    """AlphaFold 2 input dataclass."""
     prev_init: bool = False
     pos_init: bool = False
     data: dict = None
@@ -41,14 +44,25 @@ class AFInput:
         return self.data.items()
     @staticmethod
     def from_data(data: Any) -> "AFInput":
+        """Convert a dictionary or DesignData object to AFInput."""
         return AFInput(
             prev_init=False,
             pos_init=False,
             data=_af_input_from_data(data))
 
+    @staticmethod
+    def from_sequence(sequence: Any) -> "AFInput":
+        return AFInput(
+            prev_init=False,
+            pos_init=False,
+            data=_af_input_from_sequence(sequence)
+        )
+
     def add_guess(self,
                   data: DesignData | None = None,
                   pos: Array | None = None) -> "AFInput":
+        """Add initial guess information to an AFInput using a
+        DesignData object `data` or coordinate array `pos`."""
         if data is not None:
             positions = data["atom_positions"]
         elif pos is not None:
@@ -65,6 +79,8 @@ class AFInput:
     def add_pos(self,
                 data: DesignData | None = None,
                 pos: Array | None = None):
+        """Add structure module initial position information to
+        an AFInput using a Design data object `data` or a coordinate array `pos`."""
         if data is not None:
             positions = data["atom_positions"]
         elif pos is not None:
@@ -77,6 +93,8 @@ class AFInput:
         return result
 
     def block_diagonal(self, num_sequences=2):
+        """Expand an AFInput's multiple sequence alignment features to
+        block diagonal form, with a total number of sequences `num_sequences`."""
         chain = self.data["asym_id"]
         chain = jnp.unique(chain, size=num_sequences, return_inverse=True)[1]
         gap_seq = jax.nn.one_hot(jnp.full_like(chain, 21), 22)
@@ -98,6 +116,11 @@ class AFInput:
                      pos_mask: Array | None = None,
                      aa: Array | None = None,
                      where: Array = True):
+        """Add template information to an AFInput, using a DesignData object,
+        or a set of coordinates `pos`, atom mask `pos_mask` and integer-encoded
+        amino acid sequence `aa`.
+        `where` limits the template to a subset of residues defined by a boolean mask.
+        """
         where = jnp.array(where, dtype=jnp.bool_)
         if data is not None:
             positions = data["atom_positions"]
@@ -142,6 +165,7 @@ class AFInput:
         return result
 
     def update_sequence(self, sequence: Array) -> "AFInput":
+        """Modify the underlying sequence of an AFInput to `sequence`."""
         result = AFInput(
             prev_init=self.prev_init, pos_init=self.pos_init,
             data={k: v for k, v in self.data.items()})
@@ -244,6 +268,7 @@ def _chain_residue_index(residue_index, chain_index):
 
 @chex.dataclass(mappable_dataclass=False)
 class AFResult:
+    """AlphaFold result dataclass."""
     inputs: dict = None
     result: dict = None
     def _mean_of_binned(self, name, has_edges=True) -> jnp.ndarray:
@@ -260,6 +285,7 @@ class AFResult:
 
     @property
     def atom14(self):
+        """Atom14 format atom coordinates."""
         atom37 = self.result["structure_module"]['final_atom_positions']
         mask37 = self.result["structure_module"]['final_atom_mask']
         atom14, mask14 = atom37_to_atom14(
@@ -268,19 +294,23 @@ class AFResult:
 
     @property
     def atom4(self) -> jnp.ndarray:
+        """N, CA, C and O atom coordinates."""
         atom14, _ = self.atom14
         return atom14[:, :4]
 
     @property
     def plddt(self):
+        """Per-residue pLDDT."""
         return self._mean_of_binned("predicted_lddt", has_edges=False)
 
     @property
     def pae(self):
+        """Per-residue pair predicted aligned error."""
         return self._mean_of_binned("predicted_aligned_error", has_edges=False)
     
     @property
     def ipae(self):
+        """Mean interface pAE."""
         pae = self.pae
         chain = self.inputs["asym_id"]
         other_chain = chain[:, None] != chain[None, :]
@@ -288,9 +318,11 @@ class AFResult:
 
     @property
     def distance(self):
+        """Distogram predicted distance of pairs of amino acid residues."""
         return self._mean_of_binned("distogram")
 
     def to_data(self) -> DesignData:
+        """Convert an AFResult to DesignData."""
         atom14, mask14 = self.atom14
         return DesignData(data=dict(
             atom_positions=atom14,
@@ -306,6 +338,12 @@ class AFResult:
         ))
 
     def contact_probability(self, contact_distance=10.0) -> jnp.ndarray:
+        """Compute the distogram predicted contact probability for each
+        pair of amino acids.
+        
+        Args:
+            contact_distance: Contact distance cutoff in Angstroms. Default: 10.0.
+        """
         distogram = jax.nn.softmax(self.result["distogram"]["logits"], axis=-1)
         bin_edges: jnp.ndarray = self.result["distogram"]["bin_edges"]
         bin_step = bin_edges[1] - bin_edges[0]
@@ -315,6 +353,9 @@ class AFResult:
         return (edge_mask * distogram).sum(axis=-1)
     
     def contact_entropy(self, contact_distance=14.0) -> jnp.ndarray:
+        """Compute the distogram contact entropy for each pair of amino acids.
+        This is the metric used for optimization in BoltzDesign-1, Cho et al. 2025 (10.1101/2025.04.06.647261).
+        """
         distogram = jax.nn.log_softmax(self.result["distogram"]["logits"], axis=-1)
         bin_edges: jnp.ndarray = self.result["distogram"]["bin_edges"]
         bin_step = bin_edges[1] - bin_edges[0]
@@ -326,6 +367,7 @@ class AFResult:
         return -(distogram_clipped * distogram).sum(axis=-1)
 
     def save_pdb(self, path):
+        """Save an AFResult in PDB format at `path`."""
         _save_af_pdb(path, self)
         return path
 

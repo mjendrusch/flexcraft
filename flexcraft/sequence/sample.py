@@ -1,3 +1,10 @@
+"""This module implements utilities for sampling from ProteinMPNN
+or similar sequence design models.
+
+It provides functions for transforming amino acid logits and sampling sequences
+from ProteinMPNN in a controlled manner.
+"""
+
 from typing import List
 import numpy as np
 
@@ -6,6 +13,7 @@ import jax.numpy as jnp
 
 
 def scale_by_temperature(temperature: float | List[float] = 0.1):
+    """Scale logits by temperature."""
     def inner(logits, data):
         return logits / temperature
 
@@ -13,6 +21,7 @@ def scale_by_temperature(temperature: float | List[float] = 0.1):
 
 
 def center_logits(center=None):
+    """Center logits by subtracting their mean, or a precomputed `center`."""
     def inner(logits, data):
         cc = center
         if cc is None:
@@ -23,6 +32,12 @@ def center_logits(center=None):
 
 
 def forbid(amino_acids, aa_code):
+    """Modify logits to forbid the sampling of a set of amino acids.
+    
+    Args:
+        amino_acids: single letter code iterable of forbidden amino acids.
+        aa_code: amino acid code to translate single letter code into one-hot.
+    """
     forbidden_index = np.array([aa_code.index(c) for c in amino_acids], dtype=np.int32)
     forbidden_mask = np.zeros((len(aa_code) + 1,), dtype=np.bool_)
     forbidden_mask[forbidden_index] = True
@@ -34,6 +49,8 @@ def forbid(amino_acids, aa_code):
 
 
 def tie_logits(logits, data):
+    """Tie logits at multiple positions according to a tie_index and set of weights
+    for each tied position."""
     tie_index = data["tie_index"]
     tie_weights = data["tie_weights"]
     logits = tie_weights[:, None] * logits
@@ -45,12 +62,14 @@ def tie_logits(logits, data):
 
 
 def tie_update(aatype, position, update, data):
+    """Tie an amino acid sequence update across `tie_index` positions."""
     tie_index = data["tie_index"]
     tie_mask = tie_index == tie_index[position]
     return jnp.where(tie_mask, update, aatype)
 
 
 def transform_logits(transforms):
+    """Apply a list of logit transforms in order."""
     def inner(logits, data):
         for transform in transforms:
             logits = transform(logits, data)
@@ -60,12 +79,35 @@ def transform_logits(transforms):
 
 
 def toggle_transform(x, use=True):
+    """Optionally disable a logit transform.
+    
+    Args:
+        x: a logit transform to be turned on or off.
+        use: boolean flag specifying if the transform should be used. Default: True.
+
+    Use this together with random values for `use` to randomly toggle
+    logit transforms in your sampling process.
+    """
     if use:
         return x
     return lambda logits, data: logits
 
 
 def sample(model, select_next=None, logit_transform=None):
+    """Sample sequences from a model, with control over logit transforms
+    and amino acid sampling order.
+    
+    Args:
+        model: a ProteinMPNN-like model.
+        select_next: optional function which selects the next amino acid to sample
+            given model predictions. By default uses `select_random_position`,
+            selecting positions to sample uniformly at random from masked positions.
+        logit_transform: logit transform to apply to model logits.
+
+    Returns:
+        data: DesignData object containing the sampled sequence in the "aa" field.
+        log_p: log-likelihood of the sampled sequence under the model.
+    """
     if select_next is None:
         select_next = select_random_position
 
@@ -95,6 +137,8 @@ def sample(model, select_next=None, logit_transform=None):
 
 
 def select_random_position(key, logits, data):
+    """Selects a position to sample uniformly at random
+    from masked positions (where "aa" = 20)."""
     filled = data["aa"] != 20
     next_map = jnp.where(filled, jnp.inf, jax.random.uniform(key, (logits.shape[0],)))
     next_pos = jnp.argmin(next_map)
@@ -113,6 +157,8 @@ def replace_value(x, **kwargs):
     return result
 
 def norm_logits(logits, data):
+    """Normalize logits.
+    Should be used with logit transformations to get accurate log_p from `sample`."""
     return jax.nn.log_softmax(logits, axis=-1)
 
 if __name__ == "__main__":

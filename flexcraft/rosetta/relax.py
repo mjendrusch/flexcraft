@@ -1,3 +1,10 @@
+"""This model provides an interface to Rosetta FastRelax, via PyRosetta.
+
+Importing this module requires a PyRosetta installation. To install PyRosetta run:
+pip install pyrosetta-installer
+python -c 'import pyrosetta_installer; pyrosetta_installer.install_pyrosetta()'
+"""
+
 # Adapted from BindCraft
 
 import os
@@ -20,6 +27,17 @@ from flexcraft.data.data import DesignData
 
 def fastrelax(pdb_file: str | PDBFile | DesignData,
               relaxed_pdb_path: str | None=None, tmpdir=None):
+    """Run FastRelax with default settings on a `pdb_file` and write the output to `relaxed_pdb_path`.
+    
+    Args:
+        pdb_file: path to a PDB file, `PDBFile` or `DesignData` object to be relaxed.
+        relaxed_pdb_path: optional path to the output relaxed PDB.
+            If not provided, this will produce and remove temporary PDB files.
+        tmpdir: optional path to a temporary file directory. If not provided, will write to "tmp/".
+    
+    Returns:
+        `PDBFile` object of the relaxed structure.
+    """
     if isinstance(pdb_file, PDBFile):
         pdb_file = pdb_file.path
     if isinstance(pdb_file, DesignData):

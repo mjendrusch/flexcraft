@@ -1,4 +1,8 @@
-# adapted from ColabFold
+"""This module implements a jax version of ProteinMPNN, adapted from ColabDesign.
+Compared to ColabDesign, this version enables dynamically choosing the order of amino acid sampling
+and allows simultaneous prediction of all masked logits without an input sequence.
+"""
+# adapted from ColabDesign
 
 import joblib
 
@@ -97,8 +101,8 @@ class EncLayer(hk.Module):
 
         # tie neighbour features across tied positions
         if tie_info is not None:
-            dh_weighted = dh * tie_info["tie_weights"]
-            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)
+            dh_weighted = dh * tie_info["tie_weights"][:, None]
+            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)[tie_info["tie_index"]]
 
         h_V = self.norm1(h_V + drop(dh, rate=self.dropout))
 
@@ -155,8 +159,8 @@ class DecLayer(hk.Module):
 
         # tie neighbour features across tied positions
         if tie_info is not None:
-            dh_weighted = dh * tie_info["tie_weights"]
-            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)
+            dh_weighted = dh * tie_info["tie_weights"][:, None]
+            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)[tie_info["tie_index"]]
         
         h_V = self.norm1(h_V + drop(dh, rate=self.dropout))
 
@@ -546,7 +550,7 @@ def load_params(params_path):
     return joblib.load(params_path)
 
 
-def make_pmpnn(params_path, num_neighbours=48, eps=0.0):
+def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False):
     config = {
         "num_letters": 21,
         "node_features": 128,
@@ -557,6 +561,7 @@ def make_pmpnn(params_path, num_neighbours=48, eps=0.0):
         "augment_eps": eps,
         "k_neighbors": num_neighbours,
         "dropout": 0,
+        "tie_messages": tie_messages
     }
 
     def inner(x):

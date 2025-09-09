@@ -1,3 +1,5 @@
+"""Utilities for option parsing scripts."""
+
 import argparse
 
 class OptionType:
