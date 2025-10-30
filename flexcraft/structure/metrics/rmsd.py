@@ -49,9 +49,8 @@ class RMSD:
         if index is None:
             index = np.zeros(x.shape[:1], dtype=np.int32)
 
-        # FIXME: is this right?
         params = index_kabsch(
             x, y, index, mask)
-        x_p = apply_alignment(x, params)#index_align(x, y, index, mask)
+        x_p = apply_alignment(x, params)
         return jnp.sqrt(jnp.where(
             mask[:, None], (y - x_p) ** 2, 0).mean())

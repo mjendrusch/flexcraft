@@ -4,7 +4,7 @@ models."""
 
 import os
 from copy import copy
-from typing import Any, List, cast, Iterable
+from typing import Any, List, cast, Iterable, Dict
 
 import numpy as np
 
@@ -114,10 +114,24 @@ class DesignData:
         Secondary structure (loop, helix, strand) states are encoded as integers.
         (loop = 0, helix = 1, strand = 2)
         """
-        result, *_ = assign_dssp(
+        if "dssp" in self.data:
+            return self["dssp"]
+        self.assign_dssp()
+        return self.data["dssp"]
+
+    @property
+    def p_dssp(self) -> Dict[str, float]:
+        data = self.assign_dssp()
+        L, H, E = jax.nn.one_hot(data.dssp, 3).mean(axis=0).T
+        return dict(L=L, H=H, E=E)
+
+    def assign_dssp(self) -> "DesignData":
+        result = self
+        dssp, *_ = assign_dssp(
             self.data["atom_positions"][:, :4],
             self.data["batch_index"],
             self.data["atom_mask"][:, :4].all(axis=1))
+        self.data["dssp"] = dssp
         return result
 
     @property
@@ -318,6 +332,7 @@ class DesignData:
             name = item.name
             if name not in unique_ties:
                 unique_ties[name] = jnp.arange(offset, offset + length)
+                offset += length
             tie_index.append(unique_ties[name])
             tie_weights.append(item.weight * np.ones((length,), dtype=np.float32))
         tie_index = jnp.concatenate(tie_index, axis=0)
@@ -353,6 +368,14 @@ class DesignData:
             residue_index=data["residue_index"],
             chain_index=data["chain_index"],
             b_factors=b_factors)
+
+    def to_pdb_string(self) -> str:
+        """Return a PDB string corresponding to this DesignData object.
+        
+        Returns:
+            PDB string for this DesignData object.
+        """
+        return to_pdb(self.to_protein())
 
     def save_pdb(self, path):
         """Save a DesignData object to a PDB file.

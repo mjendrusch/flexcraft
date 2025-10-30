@@ -38,10 +38,13 @@ def fastrelax(pdb_file: str | PDBFile | DesignData,
     Returns:
         `PDBFile` object of the relaxed structure.
     """
+    uses_tmpfile = False
     if isinstance(pdb_file, PDBFile):
         pdb_file = pdb_file.path
     if isinstance(pdb_file, DesignData):
-        pdb_file = PDBFile(pdb_file, tmpdir=tmpdir).path
+        uses_tmpfile = True
+        tmp_file = PDBFile(pdb_file, tmpdir=tmpdir)
+        pdb_file = tmp_file.path
     if relaxed_pdb_path is None:
         relaxed_pdb_path = PDBFile.get_tmp_path(prefix="relaxed", tmpdir=tmpdir)
     if relaxed_pdb_path and not os.path.isdir(os.path.dirname(relaxed_pdb_path)):
@@ -86,4 +89,8 @@ def fastrelax(pdb_file: str | PDBFile | DesignData,
     pose.dump_pdb(relaxed_pdb_path)
     result = PDBFile(path=relaxed_pdb_path)
     result.clean()
+    # FIXME: this causes subsequent steps to fail, why?
+    # if uses_tmpfile:
+    #     # clean up input PDB file
+    #     tmp_file.remove()
     return result

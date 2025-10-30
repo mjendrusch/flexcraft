@@ -25,6 +25,7 @@ from flexcraft.structure.af._data import AFInput, AFResult
 def make_af2(config, use_multimer=False):
     """Construct an AlphaFold model given a configuration."""
     def inner(params, key, data):
+        config.model.num_recycle = None
         return model.RunModel(
             config, None,
             recycle_mode=None,
@@ -80,7 +81,7 @@ def make_predict(model, num_recycle=4):
         if isinstance(data, AFInput):
             data = data.data
         prev = data["prev"]
-        if num_recycle > 0:
+        if num_recycle - 1 > 0:
             prev, _ = jax.lax.scan(
                 jax.remat(body), prev,
                 jax.random.split(key, num_recycle - 1))

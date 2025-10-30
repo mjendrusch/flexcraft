@@ -1,6 +1,7 @@
 """This module implements AlphaFold2 input (AFInput) and result (AFResult) dataclasses."""
 
 from copy import copy
+import os
 from typing import Any, Optional
 
 import numpy as np
@@ -316,6 +317,39 @@ class AFResult:
         other_chain = chain[:, None] != chain[None, :]
         return (pae * other_chain).sum() / jnp.maximum(1, other_chain.sum())
 
+    def ptm_matrix(self, L=None):
+        """Predicted template modeling score (TM score)."""
+        pae = self.pae * 32
+        if L is None:
+            L = pae.shape[0]
+        d0 = 1.24 ** 3 * jnp.sqrt(L - 15) - 1.8
+        d0 = jnp.where(L < 27, 1, d0)
+        return (1 / (1 + (pae / d0) ** 2))
+
+    # FIXME: returns a constant value. Value should change
+    @property
+    def ptm(self):
+        return self.ptm_matrix().mean(axis=1).max(axis=0)
+
+    @property
+    def iptm(self):
+        """Interface predicted TM score."""
+        ptm = self.ptm_matrix()
+        chain = self.inputs["asym_id"]
+        other_chain = chain[:, None] != chain[None, :]
+        result = (other_chain * ptm).sum(axis=1) / jnp.maximum(other_chain.sum(axis=1), 1)
+        result = result.max(axis=0)
+        return result
+
+    def ipsae(self, pae_cutoff=0.5):
+        mask = self.pae < pae_cutoff
+        chain = self.inputs["asym_id"]
+        other_chain = chain[:, None] != chain[None, :]
+        mask *= other_chain
+        L = mask.sum(axis=1)[:, None]
+        ptm = self.ptm_matrix(L)
+        return ptm.mean(axis=1).max(axis=0)
+
     @property
     def distance(self):
         """Distogram predicted distance of pairs of amino acid residues."""
@@ -332,6 +366,7 @@ class AFResult:
             mask=mask14.any(axis=1),
             residue_index=self.inputs["residue_index"],
             chain_index=self.inputs["asym_id"],
+            batch_index=jnp.zeros_like(self.inputs["residue_index"]),
             plddt=self.plddt,
             pae=self.pae,
             distogram=self.distance
@@ -368,6 +403,9 @@ class AFResult:
 
     def save_pdb(self, path):
         """Save an AFResult in PDB format at `path`."""
+        directory = os.path.dirname(path)
+        if directory and not os.path.isdir(directory):
+            os.makedirs(directory)
         _save_af_pdb(path, self)
         return path
 

@@ -376,7 +376,8 @@ class ProteinMPNN(hk.Module):
         k_neighbors=64,
         augment_eps=0.05,
         dropout=0.1,
-        tie_messages=False
+        tie_messages=False,
+        scale_bias=None,
     ):
         super(ProteinMPNN, self).__init__(name="protein_mpnn")
 
@@ -385,6 +386,7 @@ class ProteinMPNN(hk.Module):
         self.edge_features = edge_features
         self.hidden_dim = hidden_dim
         self.tie_messages = tie_messages
+        self.scale_bias = scale_bias
 
         # Featurization layers
         self.features = ProteinFeatures(
@@ -452,7 +454,11 @@ class ProteinMPNN(hk.Module):
                 # update
                 x["local"] = x["local"].at[l + 1].set(local)
 
-            logits = jax.nn.log_softmax(self.W_out(local), axis=-1)
+            out_bias = 0
+            if self.scale_bias is not None:
+                bias = self.W_out.params_dict()["b"]
+                out_bias = -bias + self.scale_bias * bias
+            logits = jax.nn.log_softmax(self.W_out(local) + out_bias, axis=-1)
             # set logits at unfilled positions
             x["logits"] = logits#jnp.where(filled[..., None], x["logits"], logits)
 
@@ -550,7 +556,7 @@ def load_params(params_path):
     return joblib.load(params_path)
 
 
-def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False):
+def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scale_bias=None):
     config = {
         "num_letters": 21,
         "node_features": 128,
@@ -561,7 +567,8 @@ def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False):
         "augment_eps": eps,
         "k_neighbors": num_neighbours,
         "dropout": 0,
-        "tie_messages": tie_messages
+        "tie_messages": tie_messages,
+        "scale_bias": scale_bias
     }
 
     def inner(x):

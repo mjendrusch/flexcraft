@@ -20,13 +20,19 @@ def scale_by_temperature(temperature: float | List[float] = 0.1):
     return inner
 
 
-def center_logits(center=None):
+def center_logits(center=None, bias=None, scale=None):
     """Center logits by subtracting their mean, or a precomputed `center`."""
     def inner(logits, data):
         cc = center
         if cc is None:
             cc = logits.mean(axis=0)
-        return jax.nn.log_softmax(logits - cc, axis=-1)
+        if bias is not None:
+            # re-add amino acid bias to baseline
+            cc = cc - bias
+        centered_logits = logits - cc
+        if scale is not None:
+            centered_logits = logits + (1 - scale) / scale * center
+        return jax.nn.log_softmax(centered_logits, axis=-1)
 
     return inner
 
@@ -128,7 +134,7 @@ def sample(model, select_next=None, logit_transform=None):
             key, subkey = jax.random.split(key, 2)
             next_pos = select_next(subkey, logits, data)
             key, subkey = jax.random.split(key, 2)
-            sampled = jax.random.categorical(subkey, logits=logits[next_pos])
+            sampled = jax.random.categorical(subkey, logits=logits[next_pos, :20])
             log_p += raw_logits[next_pos, sampled]
             data["aa"] = tie_update(data["aa"], next_pos, sampled, data)
         return data, log_p
