@@ -112,7 +112,7 @@ class BindCraftProperties:
         aligned_positions = index_align(
             relaxed_data["atom_positions"][is_binder], design["atom_positions"][is_binder],
             design["batch_index"][is_binder], design["mask"][is_binder])
-        result["Target_RMSD"] = jnp.sqrt(((aligned_positions[:, 1] - design["atom_positions"][is_binder, 1]) ** 2).mean())
+        result["Binder_RMSD"] = jnp.sqrt(((aligned_positions[:, 1] - design["atom_positions"][is_binder, 1]) ** 2).mean())
         # adapted from BindCraft
         result.update({
             'Binder_Energy_Score': if_scores['binder_score'],
