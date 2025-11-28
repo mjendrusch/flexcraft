@@ -15,6 +15,7 @@ pip install git+https://github.com/mjendrusch/flexcraft.git
 # download and extract model parameters
 wget https://zenodo.org/records/14711580/files/salad_params.tar.gz
 tar -xzf salad_params.tar.gz
+mv params salad_params
 mkdir pmpnn_params
 cd pmpnn_params
 for noise in 05 10 20 30; do
@@ -27,9 +28,19 @@ for noise in 05 10 20 30; do
     wget https://github.com/sokrypton/ColabDesign/raw/refs/heads/main/colabdesign/mpnn/weights/v_48_0${noise}.pkl
 done
 cd ..
-mkdir params
-curl -fsSL https://storage.googleapis.com/alphafold/alphafold_params_2022-03-02.tar | tar x -C params
+mkdir af2_params
+curl -fsSL https://storage.googleapis.com/alphafold/alphafold_params_2022-03-02.tar | tar x -C af2_params
 cd ..
+
+# install pyrosetta
+pip install pyrosetta-installer
+python -c 'import pyrosetta_installer; pyrosetta_installer.install_pyrosetta()'
+
+# get DAlphaBall and make executable
+wget https://github.com/martinpacesa/BindCraft/raw/main/functions/DAlphaBall.gcc
+chmod +x DAlphaBall.gcc
+# check if executable:
+file DAlphaball.gcc
 ```
 
 ## How to use flexcraft?
