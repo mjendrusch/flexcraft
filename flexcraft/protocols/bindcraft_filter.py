@@ -3,6 +3,7 @@ from collections import defaultdict
 import jax
 import jax.numpy as jnp
 import numpy as np
+import sys
 
 from flexcraft.files.pdb import PDBFile
 from flexcraft.data.data import DesignData
@@ -13,11 +14,21 @@ from flexcraft.rosetta.interface_analyzer import score_interface
 from salad.modules.utils.geometry import index_align
 
 class BindCraftProperties:
-    def __init__(self, path, key, af_parameter_path, filter=None,
-                 use_guess=False, relaxed_name="relaxed"):
+    def __init__(self, path, key, af_parameter_path, set_int, filter, 
+                 use_guess=False, relaxed_name="relaxed", ipae_shortcut_threshold=0.35):
         if filter is None:
             filter = default_filter
-        # self.config = config # FIXME: Add config
+        elif filter == "default":
+            filter = default_filter
+        else:
+            print("CRITICAL ERROR: Please provide a valid filter to use for successful designs.")
+            sys.exit()
+
+        if set_int is None:
+            set_int="A_B" #fall back to default if interface is not specified
+        
+        self.set_int = set_int
+        self.ipae_shortcut_threshold = ipae_shortcut_threshold
         self.path = path
         self.relaxed_name = relaxed_name
         self.af2_params = [
@@ -62,8 +73,7 @@ class BindCraftProperties:
                            name: str,
                            af_result: AFResult,
                            design: DesignData,
-                           is_target: jnp.ndarray,
-                           ipae_shortcut_threshold=0.35) -> dict:
+                           is_target: jnp.ndarray,) -> dict:
         result = dict()
         is_binder = ~is_target
         pair_is_binder = is_binder[:, None] * is_binder[None, :]
@@ -78,7 +88,7 @@ class BindCraftProperties:
         result["Binder_pAE"] = (af_result.pae * pair_is_binder).sum() / jnp.maximum(pair_is_binder.sum(), 1)
         result["i_pAE"] = af_result.ipae
         # FIXME if pass, relax the af2 structure. Else, continue
-        if result["i_pAE"] >= ipae_shortcut_threshold:
+        if result["i_pAE"] >= self.ipae_shortcut_threshold:
             result.update({
                 'Binder_Energy_Score': np.nan,
                 'Surface_Hydrophobicity': np.nan,
@@ -100,7 +110,8 @@ class BindCraftProperties:
         # Rosetta relax the af2 structure
         relaxed: PDBFile = fastrelax(af_result.to_data(), f"{self.path}/{self.relaxed_name}/{name}.pdb")
         relaxed_data = relaxed.to_data()
-        if_scores, if_aa = score_interface(relaxed, is_target)
+        if_scores, if_aa = score_interface(relaxed, is_target, self.set_int)
+
         # alignment / RMSD
         aligned_positions = index_align(
             relaxed_data["atom_positions"], design["atom_positions"], design["batch_index"], design["mask"])
@@ -148,13 +159,13 @@ def default_filter(result):
     success = success and (result["1_ShapeComplementarity"] > 0.55)
     success = success and (result["2_ShapeComplementarity"] > 0.55)
     success = success and (result["Average_ShapeComplementarity"] > 0.6)
-    success = success and (result["1_dSASA"] > 1.0)
-    success = success and (result["2_dSASA"] > 1.0)
-    success = success and (result["1_n_InterfaceResidues"] >= 7)
-    success = success and (result["2_n_InterfaceResidues"] >= 7)
-    success = success and (result["1_n_InterfaceHbonds"] >= 3)
-    success = success and (result["2_n_InterfaceHbonds"] >= 3)
-    success = success and (result["1_n_InterfaceUnsatHbonds"] < 10)
-    success = success and (result["2_n_InterfaceUnsatHbonds"] < 10)
+    success = success and (result["1_dSASA"] > 1.0) 
+    success = success and (result["2_dSASA"] > 1.0) 
+    success = success and (result["1_n_InterfaceResidues"] >= 7) 
+    success = success and (result["2_n_InterfaceResidues"] >= 7) 
+    success = success and (result["1_n_InterfaceHbonds"] >= 3) 
+    success = success and (result["2_n_InterfaceHbonds"] >= 3) 
+    success = success and (result["1_n_InterfaceUnsatHbonds"] < 10) 
+    success = success and (result["2_n_InterfaceUnsatHbonds"] < 10) 
     success = success and (result["Average_RMSD"] < 2.0)
     return success
