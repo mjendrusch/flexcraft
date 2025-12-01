@@ -37,7 +37,7 @@ def data_from_salad(data: dict) -> DesignData:
         batch_index=data["batch_index"],
         tie_index=np.arange(data["aatype"].shape[0], dtype=np.int32),
         tie_weights=np.ones((data["aatype"].shape[0],), dtype=np.float32),
-        mask=get_atom14_mask(data["aatype"]).any(axis=1)
+        mask=data["mask"] * get_atom14_mask(data["aatype"]).any(axis=1)
     ))
 
 def load_pdb(path: str):

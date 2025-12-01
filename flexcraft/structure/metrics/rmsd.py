@@ -42,15 +42,19 @@ class RMSD:
             x = x["atom_positions"]
         if isinstance(y, DesignData):
             y = y["atom_positions"]
-        x = x[:, atom_index].reshape(-1, 3)
-        y = y[:, atom_index].reshape(-1, 3)
         if mask is None:
             mask = np.ones(x.shape[:1], dtype=np.bool_)
         if index is None:
             index = np.zeros(x.shape[:1], dtype=np.int32)
+        mask = np.broadcast_to(mask[:, None], (x.shape[0], atom_index.shape[0])).reshape(-1)
+        index = np.broadcast_to(index[:, None], (x.shape[0], atom_index.shape[0])).reshape(-1)
+        x = x[:, atom_index].reshape(-1, 3)
+        y = y[:, atom_index].reshape(-1, 3)
 
         params = index_kabsch(
             x, y, index, mask)
-        x_p = apply_alignment(x, params)
-        return jnp.sqrt(jnp.where(
-            mask[:, None], (y - x_p) ** 2, 0).mean())
+        x_p = apply_alignment(x[:, None], params)[:, 0]
+        result = jnp.sqrt(
+            jnp.where(mask > 0, ((y - x_p) ** 2).sum(axis=-1), 0).sum()
+            / jnp.maximum(1, mask.astype(jnp.int32).sum()))
+        return result

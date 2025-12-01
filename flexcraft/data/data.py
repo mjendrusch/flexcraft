@@ -356,7 +356,9 @@ class DesignData:
         """Turn a DesignData object into an AlphaFold2 Protein object."""
         data = tree.map_structure(lambda x: np.array(x), self.data)
         atom37 = atom14_to_atom37(data["atom_positions"], data["aa"])
-        mask37 = get_atom37_mask(data["aa"])#atom14_to_atom37(data["atom_mask"], data["aa"])
+        has_atom = data["mask"]
+        # FIXME: drop masked atoms
+        mask37 = has_atom[:, None] * get_atom37_mask(data["aa"])#atom14_to_atom37(data["atom_mask"], data["aa"])
         if b_factors is None:
             b_factors = np.ones_like(mask37, dtype=np.float32)
             if "plddt" in data:
