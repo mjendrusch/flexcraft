@@ -1,13 +1,14 @@
-
 import os
 import shutil
 import gemmi
 from copy import deepcopy
 import random
+import ast
 
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from Bio.SeqUtils.IsoelectricPoint import IsoelectricPoint as IP
 
@@ -123,10 +124,10 @@ def parse_target(c, path, num_aa):
 
 opt = parse_options(
     "Use salad to generate large protein complexes.",
-    salad_params="/path-to/salad_params/default_ve_scaled-200k.jax", 
-    pmpnn_params="/path-to/pmpnn_params/v_48_030.pkl",
-    af2_params="/path-to/af2_params",
-    alphaball_path="/path-to/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
+    salad_params="/mnt/sds-hd/sd24c002/fredi/params/flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
+    pmpnn_params="/mnt/sds-hd/sd24c002/fredi/params/flexcraft_params/pmpnn_params/v_48_030.pkl",
+    af2_params="/mnt/sds-hd/sd24c002/fredi/params/flexcraft_params/af2_params",
+    alphaball_path="/mnt/sds-hd/sd24c002/fredi/params/flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
     out_path="/path-to/output/",
     target="target.pdb",
     scaffold="none", # TODO: make this work for Ab design
@@ -150,13 +151,20 @@ opt = parse_options(
     prev_threshold=0.9,
     use_cycler="False",
     fix_template="False",
+    af2_cycler_repeats=10, # how many iterations the af2_cycler should do
     visualize_centers="False",
     ipae_shortcut_threshold=0.35, # which ipae threshold to use for Rosetta relaxation
-    save_fail_pdbs="True", #whether to save pdb files of failed designs
-    allow_target_mutations=0,
+    allow_target_mutations="0", # Number of target interface residues allowed to be redesigned by ProteinMPNN, pass as STR. # int (e.g. "0") or list giving range, (e.g. "[0,5]"" for up to 5 mutations)
     redesign_radius=10, # Target residue distance for redesign in Angstrom (if allow_target_mutations > 0). 
+    save_af2cycler_PDB="True", # whether to save all af2cycler PDB files
+    save_fail_PDB="True", # whether to save PDB files of failed designs
     seed=37,
 )
+
+try:
+    opt.allow_target_mutations = ast.literal_eval(str(opt.allow_target_mutations))
+except (ValueError, SyntaxError):
+    raise ValueError(f"Warning: Could not parse allow_target_mutations: {opt.allow_target_mutations}")
 
 # set up output directories
 os.makedirs(f"{opt.out_path}/attempts/", exist_ok=True)
@@ -226,7 +234,6 @@ config.radius = opt.radius
 config.relax_cutoff = opt.relax_cutoff
 config.target_size = target_size
 monomer_num_aa = opt.num_aa
-num_chains = 2 # FIXME
 init_data, init_prev = si.data.from_config(
     config, num_aa=num_aa, chain_index=chain,
     residue_index=resi, cyclic_mask=cyclic_mask,
@@ -266,7 +273,7 @@ pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalph
 
 # set up output files
 score_keys = (
-    "attempt", "seq_id", "target_seq","binder_seq","success", "failure_reason"
+    "attempt", "seq_id", "target_seq","binder_seq","n_target_mutations","success", "failure_reason"
 )
 score_keys = list(score_keys) + [
     f"{i}_{name}"
@@ -317,13 +324,15 @@ while success_count < opt.num_designs:
     if opt.dry_run == "True":
         continue
     design_info = dict(attempt=attempt)
+    design_info["n_target_mutations"] = 0 
     init_info = design_info
     # optionally apply af2cycler
     if opt.use_cycler == "True":
         cycled = design
-        for idc in range(10):
+        for idc in range(opt.af2_cycler_repeats):
             cycled, predicted = cycler(af2_params, key, cycled, cycle_mask=~is_target)
-            predicted.save_pdb(f"{opt.out_path}/cycles/design_{attempt}_{idc}.pdb")
+            if opt.save_af2cycler_PDB=="True":
+                predicted.save_pdb(f"{opt.out_path}/cycles/design_{attempt}_{idc}.pdb")
         design = cycled
 
     # identify contact residues
@@ -335,14 +344,33 @@ while success_count < opt.num_designs:
     # Create the base input for MPNN: binders are masked (20), target is fixed.
     target_aa = jnp.where(is_target, aas.translate(aa_condition, aas.AF2_CODE, aas.PMPNN_CODE), 20)
 
+    # determine the desired number of target mutations for this specific design: 
+    desired_mutations = 0
+    
+    if isinstance(opt.allow_target_mutations, int):
+        desired_mutations = opt.allow_target_mutations
+    elif isinstance(opt.allow_target_mutations, list):
+        # Check if list has 2 elements [min, max]
+        if len(opt.allow_target_mutations) == 2:
+            low = opt.allow_target_mutations[0]
+            high = opt.allow_target_mutations[1]
+            # np.random.randint is exclusive of the high value, so we add +1
+            desired_mutations = np.random.randint(low, high + 1)
+        else:
+            raise ValueError("ERROR: allow_target_mutations list must be [min, max].")
+    else: 
+        raise ValueError("ERROR: Allowed formats for allow_target_mutations are a single integer or a list [min, max] of allowed mutations.")
+    
+
     # If target mutations are allowed, overwrite parts of the target_aa array.
-    if opt.allow_target_mutations > 0:
-        print(f"Allowing up to {opt.allow_target_mutations} target interface residues to be redesigned.")
+    if desired_mutations > 0:
         interface_indices=jnp.where(is_interface_target)[0]
         # Randomly choose a subset of these unique local residues to mutate
-        num_to_mutate = min(len(interface_indices), opt.allow_target_mutations)
+        num_to_mutate = min(len(interface_indices), desired_mutations)
         
         if num_to_mutate > 0:
+            # log number to output csv
+            design_info["n_target_mutations"] = num_to_mutate 
             selected_indices = np.random.choice(interface_indices, size=num_to_mutate, replace=False)
             # Mask these chosen residues in the MPNN input array by setting them to 20
             target_aa = target_aa.at[selected_indices].set(20)
@@ -386,7 +414,7 @@ while success_count < opt.num_designs:
         if not properties["success"]:
             design_info["failure_reason"] = "designability"
             all_designs.write_line(design_info)
-            if opt.save_fail_pdbs=="True": #made optional to save disk space
+            if opt.save_fail_PDB=="True": #made optional to save disk space
                 af2_result.save_pdb(f"{opt.out_path}/fail/design_{attempt}_{idx}.pdb")
             continue
         
