@@ -18,7 +18,7 @@ class BindCraftProperties:
     def __init__(self, path, key, af_parameter_path, set_int, filter=None, 
                  use_guess=False, relaxed_name="relaxed", ipae_shortcut_threshold=0.35):
         
-        AVAILABLE_FILTERS = {"default": default_filter, "double": double_filter, "triple": triple_filter}
+        AVAILABLE_FILTERS = {"default": default_filter}
 
         if filter is None:
             xfilter = default_filter
@@ -177,54 +177,4 @@ def default_filter(result):
     success = success and (result["1_n_InterfaceUnsatHbonds"] < 10) 
     success = success and (result["2_n_InterfaceUnsatHbonds"] < 10) 
     success = success and (result["Average_RMSD"] < 2.0)
-    return success
-
-def double_filter(result):
-    success = result["1_i_pAE"] < 0.35
-    success = success and (result["2_i_pAE"] < 0.35)
-    success = success and (result["1_pLDDT"] > 0.8)
-    success = success and (result["2_pLDDT"] > 0.8)
-    success = success and (result["1_pTM"] > 0.55)
-    success = success and (result["2_pTM"] > 0.55)
-    success = success and (result["1_i_pTM"] > 0.5)
-    success = success and (result["2_i_pTM"] > 0.5)
-    success = success and (result["1_Surface_Hydrophobicity"] < 0.35)
-    success = success and (result["2_Surface_Hydrophobicity"] < 0.35)
-    success = success and (result["1_ShapeComplementarity"] > 0.55)
-    success = success and (result["2_ShapeComplementarity"] > 0.55)
-    success = success and (result["Average_ShapeComplementarity"] > 0.6)
-    success = success and (result["1_dSASA"] > 2.0) 
-    success = success and (result["2_dSASA"] > 2.0) 
-    success = success and (result["1_n_InterfaceResidues"] >= 14) 
-    success = success and (result["2_n_InterfaceResidues"] >= 14) 
-    success = success and (result["1_n_InterfaceHbonds"] >= 6) 
-    success = success and (result["2_n_InterfaceHbonds"] >= 6) 
-    success = success and (result["1_n_InterfaceUnsatHbonds"] < 20) 
-    success = success and (result["2_n_InterfaceUnsatHbonds"] < 20) 
-    success = success and (result["Average_RMSD"] < 2.0)
-    return success
-
-def triple_filter(result):
-    success = result["1_i_pAE"] < 0.35
-    success = success and (result["2_i_pAE"] < 0.35)
-    success = success and (result["1_pLDDT"] > 0.8)
-    success = success and (result["2_pLDDT"] > 0.8)
-    success = success and (result["1_pTM"] > 0.55)
-    success = success and (result["2_pTM"] > 0.55)
-    success = success and (result["1_i_pTM"] > 0.5)
-    success = success and (result["2_i_pTM"] > 0.5)
-    success = success and (result["1_Surface_Hydrophobicity"] < 0.35)
-    success = success and (result["2_Surface_Hydrophobicity"] < 0.35)
-    success = success and (result["1_ShapeComplementarity"] > 0.55)
-    success = success and (result["2_ShapeComplementarity"] > 0.55)
-    success = success and (result["Average_ShapeComplementarity"] > 0.6)
-    success = success and (result["1_dSASA"] > 3.0) 
-    success = success and (result["2_dSASA"] > 3.0) 
-    success = success and (result["1_n_InterfaceResidues"] >= 21) 
-    success = success and (result["2_n_InterfaceResidues"] >= 21) 
-    success = success and (result["1_n_InterfaceHbonds"] >= 9) 
-    success = success and (result["2_n_InterfaceHbonds"] >= 9) 
-    success = success and (result["1_n_InterfaceUnsatHbonds"] < 30) 
-    success = success and (result["2_n_InterfaceUnsatHbonds"] < 30) 
-    success = success and (result["Average_RMSD"] < 3.0) # more leniency for triple filter
     return success

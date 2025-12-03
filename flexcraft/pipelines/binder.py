@@ -3,7 +3,6 @@ import shutil
 import gemmi
 from copy import deepcopy
 import random
-import ast
 
 import haiku as hk
 import jax
@@ -124,10 +123,10 @@ def parse_target(c, path, num_aa):
 
 opt = parse_options(
     "Use salad to generate large protein complexes.",
-    salad_params="/mnt/sds-hd/sd24c002/fredi/params/flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
-    pmpnn_params="/mnt/sds-hd/sd24c002/fredi/params/flexcraft_params/pmpnn_params/v_48_030.pkl",
-    af2_params="/mnt/sds-hd/sd24c002/fredi/params/flexcraft_params/af2_params",
-    alphaball_path="/mnt/sds-hd/sd24c002/fredi/params/flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
+    salad_params="../../../../params/flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
+    pmpnn_params="../../../../params/flexcraft_params/pmpnn_params/v_48_030.pkl",
+    af2_params="../../../../params/flexcraft_params/af2_params",
+    alphaball_path="../../../../params/flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
     out_path="/path-to/output/",
     target="target.pdb",
     scaffold="none", # TODO: make this work for Ab design
@@ -154,17 +153,13 @@ opt = parse_options(
     af2_cycler_repeats=10, # how many iterations the af2_cycler should do
     visualize_centers="False",
     ipae_shortcut_threshold=0.35, # which ipae threshold to use for Rosetta relaxation
-    allow_target_mutations="0", # Number of target interface residues allowed to be redesigned by ProteinMPNN, pass as STR. # int (e.g. "0") or list giving range, (e.g. "[0,5]"" for up to 5 mutations)
-    redesign_radius=10, # Target residue distance for redesign in Angstrom (if allow_target_mutations > 0). 
-    save_af2cycler_PDB="True", # whether to save all af2cycler PDB files
-    save_fail_PDB="True", # whether to save PDB files of failed designs
+    allow_target_mutations="0", # number of target interface residues allowed to be redesigned by ProteinMPNN. Set to 0 to leave target sequence as is. Can take a range for random sampling, e.g. "0-3"
+    redesign_radius=10, # target residue distance for redesign in Angstrom (if target mutations are allowed). 
+    save_af2cycler_pdb="True", # whether to save all af2cycler pdb files
+    save_fail_pdb="True", # whether to save pdb files of failed designs
     seed=37,
 )
 
-try:
-    opt.allow_target_mutations = ast.literal_eval(str(opt.allow_target_mutations))
-except (ValueError, SyntaxError):
-    raise ValueError(f"Warning: Could not parse allow_target_mutations: {opt.allow_target_mutations}")
 
 # set up output directories
 os.makedirs(f"{opt.out_path}/attempts/", exist_ok=True)
@@ -265,7 +260,7 @@ af2_config.model.global_config.use_dgram = False
 af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
 cycler = af_cycler(jax.jit(make_predict(make_af2(af2_config), num_recycle=0)),
                    pmpnn, confidence=None, fix_template=opt.fix_template == "True")
-filter = BindCraftProperties(opt.out_path, key, opt.af2_params,set_int=opt.set_rosetta_intf,filter=opt.bindcraft_success_filter,ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
+filter = BindCraftProperties(opt.out_path, key, opt.af2_params, set_int=opt.set_rosetta_intf, filter=opt.bindcraft_success_filter, ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
 
 
 # set up pyrosetta
@@ -331,7 +326,7 @@ while success_count < opt.num_designs:
         cycled = design
         for idc in range(opt.af2_cycler_repeats):
             cycled, predicted = cycler(af2_params, key, cycled, cycle_mask=~is_target)
-            if opt.save_af2cycler_PDB=="True":
+            if opt.save_af2cycler_pdb == "True":
                 predicted.save_pdb(f"{opt.out_path}/cycles/design_{attempt}_{idc}.pdb")
         design = cycled
 
@@ -345,26 +340,19 @@ while success_count < opt.num_designs:
     target_aa = jnp.where(is_target, aas.translate(aa_condition, aas.AF2_CODE, aas.PMPNN_CODE), 20)
 
     # determine the desired number of target mutations for this specific design: 
-    desired_mutations = 0
+    target_mut = opt.allow_target_mutations.split("-")
+    if len(target_mut) == 1:
+        desired_mutations = int(target_mut)
+    elif len(target_mut) == 2: 
+        lower_bound = int(target_mut[0])
+        upper_bound = int(target_mut[1])
+        desired_mutations = np.random.randint(lower_bound, upper_bound + 1)
+    else:
+        raise ValueError("Incorrect format for allowed_target_mut, this must be an int passed as a string (e.g. '0') or a range separated by '-', e.g. '0-3'.")
     
-    if isinstance(opt.allow_target_mutations, int):
-        desired_mutations = opt.allow_target_mutations
-    elif isinstance(opt.allow_target_mutations, list):
-        # Check if list has 2 elements [min, max]
-        if len(opt.allow_target_mutations) == 2:
-            low = opt.allow_target_mutations[0]
-            high = opt.allow_target_mutations[1]
-            # np.random.randint is exclusive of the high value, so we add +1
-            desired_mutations = np.random.randint(low, high + 1)
-        else:
-            raise ValueError("ERROR: allow_target_mutations list must be [min, max].")
-    else: 
-        raise ValueError("ERROR: Allowed formats for allow_target_mutations are a single integer or a list [min, max] of allowed mutations.")
-    
-
     # If target mutations are allowed, overwrite parts of the target_aa array.
     if desired_mutations > 0:
-        interface_indices=jnp.where(is_interface_target)[0]
+        interface_indices = jnp.where(is_interface_target)[0]
         # Randomly choose a subset of these unique local residues to mutate
         num_to_mutate = min(len(interface_indices), desired_mutations)
         
@@ -395,8 +383,8 @@ while success_count < opt.num_designs:
         pmpnn_result = pmpnn_input.update(
             aa=aas.translate(pmpnn_result["aa"], aas.PMPNN_CODE, aas.AF2_CODE))
         
-        #write target and binder seq to output csv
-        af2_aa_order = "ARNDCQEGHILKMFPSTWYV" #standard af2 code
+        # write target and binder seq to output csv
+        af2_aa_order = "ARNDCQEGHILKMFPSTWYV" # standard af2 code
         seq_indices = np.array(pmpnn_result["aa"]).flatten()
         target_all_indices = seq_indices[is_target] # extract target sequence
         target_seq = "".join([af2_aa_order[i] if i < 20 else "X" for i in target_all_indices])
@@ -414,7 +402,7 @@ while success_count < opt.num_designs:
         if not properties["success"]:
             design_info["failure_reason"] = "designability"
             all_designs.write_line(design_info)
-            if opt.save_fail_PDB=="True": #made optional to save disk space
+            if opt.save_fail_pdb == "True": #made optional to save disk space
                 af2_result.save_pdb(f"{opt.out_path}/fail/design_{attempt}_{idx}.pdb")
             continue
         
