@@ -26,3 +26,7 @@ dependencies = [
 "Homepage" = "https://github.com/mjendrusch/flexcraft"
 "Bug reportes" = "https://github.com/mjendrusch/flexcraft/issues"
 "Source" = "https://github.com/mjendrusch/flexcraft/"
+
+[tool.setuptools.packages.find]
+include = ["flexcraft*"]
+exclude = ["data*"]
