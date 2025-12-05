@@ -341,7 +341,7 @@ while success_count < opt.num_designs:
     # determine the desired number of target mutations for this specific design: 
     target_mut = opt.allow_target_mutations.split("-")
     if len(target_mut) == 1:
-        desired_mutations = int(target_mut)
+        desired_mutations = int(target_mut[0])
     elif len(target_mut) == 2: 
         lower_bound = int(target_mut[0])
         upper_bound = int(target_mut[1])
