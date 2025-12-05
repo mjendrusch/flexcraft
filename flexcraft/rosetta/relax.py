@@ -43,7 +43,7 @@ def fastrelax(pdb_file: str | PDBFile | DesignData,
         pdb_file = pdb_file.path
     if isinstance(pdb_file, DesignData):
         uses_tmpfile = True
-        tmp_file = PDBFile(pdb_file, prefix="test", tmpdir=tmpdir)
+        tmp_file = PDBFile(pdb_file, prefix="tmp", tmpdir=tmpdir)
         pdb_file = tmp_file.path
     if relaxed_pdb_path is None:
         relaxed_pdb_path = PDBFile.get_tmp_path(prefix="relaxed", tmpdir=tmpdir)
