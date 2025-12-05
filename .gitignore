@@ -1,0 +1,8 @@
+# .gitignore
+__pycache__/
+*.pyc
+*.egg-info/
+.DS_Store
+._.DS_Store
+._*
+flexcraft_params/
