@@ -3,7 +3,6 @@ from collections import defaultdict
 import jax
 import jax.numpy as jnp
 import numpy as np
-import sys
 
 from flexcraft.files.pdb import PDBFile
 from flexcraft.data.data import DesignData
@@ -12,7 +11,6 @@ from flexcraft.structure.af import (
 from flexcraft.rosetta.relax import fastrelax
 from flexcraft.rosetta.interface_analyzer import score_interface
 from salad.modules.utils.geometry import index_align
-
 
 class BindCraftProperties:
     def __init__(self, path, key, af_parameter_path, filter=None, 
@@ -47,7 +45,6 @@ class BindCraftProperties:
         self.key = key
         self.filter=xfilter
     
-
     def __call__(self, name, design: DesignData, is_target: jnp.ndarray):
         # c = self.config
         af_input = (AFInput
@@ -116,7 +113,6 @@ class BindCraftProperties:
         relaxed: PDBFile = fastrelax(af_result.to_data(), f"{self.path}/{self.relaxed_name}/{name}.pdb")
         relaxed_data = relaxed.to_data()
         if_scores, if_aa = score_interface(relaxed, is_target)
-
         # alignment / RMSD
         aligned_positions = index_align(
             relaxed_data["atom_positions"], design["atom_positions"], design["batch_index"], design["mask"])
@@ -164,13 +160,13 @@ def default_filter(result):
     success = success and (result["1_ShapeComplementarity"] > 0.55)
     success = success and (result["2_ShapeComplementarity"] > 0.55)
     success = success and (result["Average_ShapeComplementarity"] > 0.6)
-    success = success and (result["1_dSASA"] > 1.0) 
-    success = success and (result["2_dSASA"] > 1.0) 
-    success = success and (result["1_n_InterfaceResidues"] >= 7) 
-    success = success and (result["2_n_InterfaceResidues"] >= 7) 
-    success = success and (result["1_n_InterfaceHbonds"] >= 3) 
-    success = success and (result["2_n_InterfaceHbonds"] >= 3) 
-    success = success and (result["1_n_InterfaceUnsatHbonds"] < 10) 
-    success = success and (result["2_n_InterfaceUnsatHbonds"] < 10) 
+    success = success and (result["1_dSASA"] > 1.0)
+    success = success and (result["2_dSASA"] > 1.0)
+    success = success and (result["1_n_InterfaceResidues"] >= 7)
+    success = success and (result["2_n_InterfaceResidues"] >= 7)
+    success = success and (result["1_n_InterfaceHbonds"] >= 3)
+    success = success and (result["2_n_InterfaceHbonds"] >= 3)
+    success = success and (result["1_n_InterfaceUnsatHbonds"] < 10)
+    success = success and (result["2_n_InterfaceUnsatHbonds"] < 10)
     success = success and (result["Average_RMSD"] < 2.0)
     return success

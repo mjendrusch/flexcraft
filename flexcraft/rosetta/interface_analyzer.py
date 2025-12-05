@@ -28,8 +28,7 @@ import numpy as np
 from copy import deepcopy
 
 import pyrosetta as pr
-from pyrosetta.rosetta.core.select.residue_selector import ChainSelector, NotResidueSelector
-from pyrosetta.rosetta.protocols.grafting.simple_movers import DeleteRegionMover
+from pyrosetta.rosetta.core.select.residue_selector import ChainSelector
 
 from pyrosetta.rosetta.protocols.analysis import InterfaceAnalyzerMover
 from pyrosetta.rosetta.protocols.rosetta_scripts import XmlObjects
@@ -43,6 +42,10 @@ def score_interface(pdb_file: PDBFile | str, is_target):
     if isinstance(pdb_file, str):
         pdb_file = PDBFile(path=str)
     
+    # Rosetta crashes if more than 3 chains are present in the pose
+    # Relabel all target chains to chain A and renumber residues, relabel binder to chain B
+    # If multiple binders are generated, these will all be relabelled to chain B and renumbered
+
     rosetta_data = deepcopy(pdb_file.data)
     rosetta_data["chain_index"][is_target] = 0 # all target chains are now chain A
     rosetta_data["residue_index"][is_target] = np.arange(1, np.sum(is_target) + 1) #renumber target residues
@@ -173,6 +176,7 @@ def score_interface(pdb_file: PDBFile | str, is_target):
 
     # round to two decimal places
     interface_scores = {k: round(v, 2) if isinstance(v, float) else v for k, v in interface_scores.items() if v is not None} # FIXME
-    calc_pdb.remove()
+    # remove temporary file with relabelled chains
+    calc_pdb.remove() 
 
     return interface_scores, interface_AA
