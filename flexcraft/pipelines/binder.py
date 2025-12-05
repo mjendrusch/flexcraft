@@ -123,10 +123,10 @@ def parse_target(c, path, num_aa):
 
 opt = parse_options(
     "Use salad to generate large protein complexes.",
-    salad_params="../../../../params/flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
-    pmpnn_params="../../../../params/flexcraft_params/pmpnn_params/v_48_030.pkl",
-    af2_params="../../../../params/flexcraft_params/af2_params",
-    alphaball_path="../../../../params/flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
+    salad_params="../../flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
+    pmpnn_params="../../flexcraft_params/pmpnn_params/v_48_030.pkl",
+    af2_params="../../flexcraft_params/af2_params",
+    alphaball_path="../../flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
     out_path="/path-to/output/",
     target="target.pdb",
     scaffold="none", # TODO: make this work for Ab design
@@ -134,7 +134,6 @@ opt = parse_options(
     hotspots="none",
     coldspots="none",
     num_aa=50,
-    set_rosetta_intf="A_B", # which chains to set the interface between for scoring the interface with Rosetta # A_B for monomeric target and a single binder, may be expanded in the future
     bindcraft_success_filter="default", # default is just bindcraft filter, can be expanded by adding filters to bindcraft_filter.py function
     num_designs=48,
     num_sequences=10,
@@ -260,7 +259,7 @@ af2_config.model.global_config.use_dgram = False
 af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
 cycler = af_cycler(jax.jit(make_predict(make_af2(af2_config), num_recycle=0)),
                    pmpnn, confidence=None, fix_template=opt.fix_template == "True")
-filter = BindCraftProperties(opt.out_path, key, opt.af2_params, set_int=opt.set_rosetta_intf, filter=opt.bindcraft_success_filter, ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
+filter = BindCraftProperties(opt.out_path, key, opt.af2_params, filter=opt.bindcraft_success_filter, ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
 
 
 # set up pyrosetta

@@ -25,6 +25,7 @@
 import jax
 import jax.numpy as jnp
 import numpy as np
+from copy import deepcopy
 
 import pyrosetta as pr
 from pyrosetta.rosetta.core.select.residue_selector import ChainSelector, NotResidueSelector
@@ -37,38 +38,23 @@ from flexcraft.files.pdb import PDBFile
 from flexcraft.data.data import DesignData
 import flexcraft.sequence.aa_codes as aas
 
-def score_interface(pdb_file: PDBFile | str, is_target, set_int):
+def score_interface(pdb_file: PDBFile | str, is_target):
     # load pose
     if isinstance(pdb_file, str):
         pdb_file = PDBFile(path=str)
-    pose = pr.pose_from_pdb(pdb_file.path)
-    ###---------------------------
-    # Rosetta cannot handle poses with more than 3 chains during interface calculation
-    # the program crashes even if only two chains are specified for interface calculation if more then three total are present
-    # therefore, delete everything except for the two selected chains from the Rosetta pose
-    # select the two chains from set_int for Rosetta interface calculation
-    if set_int:
-        # Convert "A_B" format from set_int to "A,B" for ChainSelector
-        # then select the chains we want to keep
-        chains_to_keep = set_int.replace('_', ',')
-        keep_selector = ChainSelector(chains_to_keep)
-        keep_selection = keep_selector.apply(pose)
-      
-        if any(keep_selection):
-            remove_selector = NotResidueSelector(keep_selector)
-            remove_selection = remove_selector.apply(pose)
-            # now, select the chains we do NOT want to keep and delete them from the Rosetta pose
-            if any(remove_selection):
-                deleter = DeleteRegionMover()
-                deleter.set_residue_selector(remove_selector)
-                deleter.set_rechain(False) # Keep original chain IDs (A, B, etc)
-                deleter.apply(pose)
-        else:
-            print("Found no matching chains for the Rosetta interface calculations, please check set_int flag.")
-    ###---------------------------
+    
+    rosetta_data = deepcopy(pdb_file.data)
+    rosetta_data["chain_index"][is_target] = 0 # all target chains are now chain A
+    rosetta_data["residue_index"][is_target] = np.arange(1, np.sum(is_target) + 1) #renumber target residues
+    rosetta_data["chain_index"][~is_target] = 1 # binder is now chain B
+    rosetta_data["residue_index"][~is_target] = np.arange(1, np.sum(~is_target) + 1) #renumber binder residues
+
+    calc_pdb = PDBFile(data=rosetta_data, prefix="interface_calc_")
+    pose = pr.pose_from_pdb(calc_pdb.path)
+
     # analyze interface statistics
     iam = InterfaceAnalyzerMover()
-    iam.set_interface(set_int)
+    iam.set_interface("A_B")
     scorefxn = pr.get_fa_scorefxn()
     iam.set_scorefunction(scorefxn)
     iam.set_compute_packstat(True)
@@ -83,27 +69,11 @@ def score_interface(pdb_file: PDBFile | str, is_target, set_int):
     interface_AA = {aa: 0 for aa in 'ACDEFGHIKLMNPQRSTVWY'}
 
     # Initialize list to store PDB residue IDs at the interface
-    data: DesignData = pdb_file.data
+    # We also use the pdb file with re-labelled residues here
+    data: DesignData = calc_pdb.data
 
-    #-----------------------
-    # for the interface residues, we need to ignore the same chains that we ignored in the rosetta pose
-    if set_int:
-        # convert set_int to list: "A_B" -> ['A', 'B'])
-        allowed_chains = set_int.split('_')
-        # Map integer chain indices (0, 1, 2) to characters ('A', 'B', 'C')
-        chain_map = np.array(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
-        # Get the character chain ID for every atom in the structure
-        # data["chain_index"] contains integers, we map them to chars
-        atom_chain_ids = chain_map[data["chain_index"]]
-        # Create a boolean mask: True if the atom belongs to a chain in set_int
-        allowed_mask = np.isin(atom_chain_ids, allowed_chains)
-    else:
-        # If no set_int provided, keep everything
-        allowed_mask = np.ones(len(data["chain_index"]), dtype=bool)
-    # ----------------------
-
-    target_data = data[is_target & allowed_mask]
-    binder_data = data[(~is_target) & allowed_mask]
+    target_data = data[is_target]
+    binder_data = data[(~is_target)]
     hotspot = jnp.linalg.norm(target_data["atom_positions"][:, None, 1] - binder_data["atom_positions"][None, :, 1], axis=-1)
     hotspot = (hotspot < 8.0).any(axis=1)
     aa = aas.decode(target_data["aa"][hotspot], aas.AF2_CODE)
@@ -142,11 +112,8 @@ def score_interface(pdb_file: PDBFile | str, is_target, set_int):
         interface_hbond_percentage = 0
         interface_bunsch_percentage = 100
     
-    ##########################################################
     # calculate binder energy score
-    allowed_chains = set_int.split('_') # convert set_int to list: "A_B" -> ['A', 'B'])
-    binder_chain=allowed_chains[-1]
-    
+    binder_chain = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[data["chain_index"][-1]] # binder is the last chain, this could also just be "B" since we relabelled anyways
     chain_design = ChainSelector(binder_chain)
     
     tem = pr.rosetta.core.simple_metrics.metrics.TotalEnergyMetric()
@@ -206,5 +173,6 @@ def score_interface(pdb_file: PDBFile | str, is_target, set_int):
 
     # round to two decimal places
     interface_scores = {k: round(v, 2) if isinstance(v, float) else v for k, v in interface_scores.items() if v is not None} # FIXME
+    calc_pdb.remove()
 
     return interface_scores, interface_AA

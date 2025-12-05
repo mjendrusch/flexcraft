@@ -15,7 +15,7 @@ from salad.modules.utils.geometry import index_align
 
 
 class BindCraftProperties:
-    def __init__(self, path, key, af_parameter_path, set_int, filter=None, 
+    def __init__(self, path, key, af_parameter_path, filter=None, 
                  use_guess=False, relaxed_name="relaxed", ipae_shortcut_threshold=0.35):
         
         AVAILABLE_FILTERS = {"default": default_filter}
@@ -32,10 +32,6 @@ class BindCraftProperties:
         else:
             raise ValueError("ERROR: The 'filter' argument must be a string, a callable function, or None.")
 
-        if set_int is None:
-            set_int="A_B" #fall back to default if interface is not specified
-        
-        self.set_int = set_int
         self.ipae_shortcut_threshold = ipae_shortcut_threshold
         self.path = path
         self.relaxed_name = relaxed_name
@@ -119,7 +115,7 @@ class BindCraftProperties:
         # Rosetta relax the af2 structure
         relaxed: PDBFile = fastrelax(af_result.to_data(), f"{self.path}/{self.relaxed_name}/{name}.pdb")
         relaxed_data = relaxed.to_data()
-        if_scores, if_aa = score_interface(relaxed, is_target, self.set_int)
+        if_scores, if_aa = score_interface(relaxed, is_target)
 
         # alignment / RMSD
         aligned_positions = index_align(
