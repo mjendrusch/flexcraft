@@ -123,11 +123,11 @@ def parse_target(c, path, num_aa):
 
 opt = parse_options(
     "Use salad to generate large protein complexes.",
-    salad_params="/flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
-    pmpnn_params="/flexcraft_params/pmpnn_params/v_48_030.pkl",
-    af2_params="/flexcraft_params/af2_params",
-    alphaball_path="/flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
-    out_path="/path-to/output/",
+    salad_params="flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
+    pmpnn_params="flexcraft_params/pmpnn_params/v_48_030.pkl",
+    af2_params="flexcraft_params/af2_params",
+    alphaball_path="flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
+    out_path="output/",
     target="target.pdb",
     scaffold="none", # TODO: make this work for Ab design
     scaffold_relax_cutoff=-1.0,
