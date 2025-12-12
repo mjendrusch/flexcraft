@@ -12,6 +12,8 @@ However, it is now in a somewhat usable state. I would not recommend using it fo
 conda create -n flexcraft python=3.10
 conda activate flexcraft
 pip install git+https://github.com/mjendrusch/flexcraft.git
+# verify installation
+python -c "import flexcraft; print('✓ flexcraft installed at:', flexcraft.__file__)"
 # download and extract model parameters
 wget https://zenodo.org/records/14711580/files/salad_params.tar.gz
 tar -xzf salad_params.tar.gz
