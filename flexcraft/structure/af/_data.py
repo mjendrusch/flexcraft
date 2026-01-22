@@ -116,22 +116,27 @@ class AFInput:
                      pos: Array | None = None,
                      pos_mask: Array | None = None,
                      aa: Array | None = None,
-                     where: Array = True):
+                     where: Array = True,
+                     template_sidechains: Array = False):
         """Add template information to an AFInput, using a DesignData object,
         or a set of coordinates `pos`, atom mask `pos_mask` and integer-encoded
         amino acid sequence `aa`.
         `where` limits the template to a subset of residues defined by a boolean mask.
         """
         where = jnp.array(where, dtype=jnp.bool_)
+        template_sidechains = jnp.array(template_sidechains, dtype=jnp.bool_)
         if data is not None:
             positions = data["atom_positions"]
             position_mask = data["atom_mask"]
             aa = data["aa"]
             where = where * data["atom_mask"].any(axis=1)
+            template_sidechains = template_sidechains * data["atom_mask"].any(axis=1)
         else:
             if pos is not None:
                 positions = self.data["atom_positions"]
                 position_mask = pos_mask
+                where = where * pos_mask.any(axis=1)
+                template_sidechains = template_sidechains * pos_mask.any(axis=1)
             if aa is None:
                 aa = self.data["aatype"]
             else:
@@ -141,7 +146,9 @@ class AFInput:
         positions = atom14_to_atom37(positions, aa)
         position_mask = atom14_to_atom37(position_mask, aa)
         atom_where = position_mask * where[:, None]
-        atom_where = atom_where.at[..., 5:].set(0)
+        atom_where = jnp.where(
+            (template_sidechains[:, None] * atom_where),
+            atom_where, atom_where.at[..., 5:].set(0))
         pseudo_beta, pseudo_where = pseudo_beta_fn(aa, positions, atom_where)
         af_input = _init_template(self.data)
         update = dict(

@@ -186,7 +186,7 @@ def prepare_segments(data):
 
 def extract_motif(pdbs, pdb_names: list, segment_defn):
     pdb: Protein = pdbs[segment_defn["pdb"]]
-    positions, _ = atom37_to_atom14(
+    positions, mask14 = atom37_to_atom14(
         pdb.aatype, Vec3Array.from_array(pdb.atom_positions), pdb.atom_mask)
     positions = positions.to_array()
     dssp, _, _ = assign_dssp(
@@ -231,8 +231,8 @@ def extract_motif(pdbs, pdb_names: list, segment_defn):
         use_center = np.ones((length,), dtype=np.bool_)
     # convert motif to atom14
     aatype = pdb.aatype[selector]
-    all_atom_pos = pdb.atom_positions[selector]
-    all_atom_mask = pdb.atom_mask[selector]
+    all_atom_pos = positions[selector]
+    all_atom_mask = mask14[selector]
     motif = positions[selector]
     motif_dssp = dssp[selector]
     return dict(
@@ -240,6 +240,7 @@ def extract_motif(pdbs, pdb_names: list, segment_defn):
         motif_chain_index = pdb.chain_index[selector],
         has_motif = all_atom_mask.any(axis=1),
         motif = motif,
+        motif_mask = all_atom_mask,
         motif_aa = aatype,
         motif_dssp = motif_dssp,
         motif_group = np.full_like(pdb.chain_index[selector], group),
@@ -275,6 +276,7 @@ def sample_data(salad_config, segments, assembly,
                     motif_chain_index = np.full((length,), -1, dtype=np.int32),
                     has_motif = np.zeros((length,), dtype=np.bool_),
                     motif = np.zeros((length, 14, 3), dtype=np.float32),
+                    motif_mask = np.zeros((length, 14), dtype=np.bool_),
                     motif_aa = np.full((length,), 20, dtype=np.int32),
                     motif_group = np.full((length,), -1, dtype=np.int32),
                     motif_dssp = np.full((length,), 3, dtype=np.int32),

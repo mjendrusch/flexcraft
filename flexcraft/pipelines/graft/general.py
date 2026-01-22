@@ -42,14 +42,25 @@ def parse_pseudo_center_file(path):
         center = []
         center_group = []
         center_time = []
+        first_line = True
         for line in f:
-            group, x, y, z, ct = line.strip().split(",")
+            if line.startswith(("center", "group")) and first_line:
+                # skip header
+                first_line = False
+                continue
+            fields = line.strip().split(",")
+            if len(fields) < 5:
+                group, x, y, z = fields
+                ct = "0.0"
+            else:
+                group, x, y, z, ct = fields
             group = int(group)
             x, y, z = float(x), float(y), float(z)
             ct = float(ct)
             center += [[x, y, z]]
             center_group += [group]
             center_time += [ct]
+            first_line = False
     center = np.array(center, dtype=np.float32)
     center_group = np.array(center_group, dtype=np.int32)
     center_time = np.array(center_time, dtype=np.int32)
@@ -65,9 +76,10 @@ opt = parse_options(
     symmetry="none",
     centers="none",
     center_radius=12.0,
-    compact_lr=0.0,
-    clash_lr=0.0,
-    compact_by="chain",
+    buried_contacts=6,
+    compact_lr=0.0, # 1e-4 - 1e-3
+    clash_lr=0.0, # 1e-3 - 7e-2
+    compact_by="chain", # &0 &1
     use_motif_dssp="False",
     use_motif_aa="none",
     center_to_chain="False",
@@ -93,7 +105,7 @@ task = defaultdict(
     use_motif_aa=opt.use_motif_aa == "True",
     center_to_chain=opt.center_to_chain == "True",
     compact_by=opt.compact_by,
-    buried_contacts=6)
+    buried_contacts=opt.buried_contacts)
 pseudo_centers = None
 if opt.centers != "none":
     task["center"] = True

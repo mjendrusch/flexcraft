@@ -13,6 +13,7 @@ from flexcraft.pipelines.graft.common import (
 from flexcraft.pipelines.graft.options import MODEL_OPTIONS, SAMPLER_OPTIONS
 from flexcraft.utils import *
 from flexcraft.files.csv import ScoreCSV
+from flexcraft.protocols.af2cycler import af_cycler
 from flexcraft.sequence.mpnn import make_pmpnn
 from flexcraft.sequence.sample import *
 from flexcraft.structure.af import *
@@ -20,7 +21,7 @@ from flexcraft.structure.metrics import RMSD
 
 import salad.inference as si
 
-from salad.modules.utils.geometry import positions_to_ncacocb, index_align
+from salad.modules.utils.geometry import positions_to_ncacocb, index_align, index_mean
 
 def model_step(config, task):
     config = deepcopy(config)
@@ -65,15 +66,22 @@ def model_step(config, task):
             t * jax.grad(restraint_indexed, argnums=(0,))(pos[:, 1])[0][:, None],
             0.0)
         data["pos"] = pos
+        # graft motif explicitly
+        motif_aligned = index_align(motif, data["pos"], group, has_motif)
+        data["pos"] = data["pos"].at[:, :4].set(
+            jnp.where((t < task["align_threshold"]) * has_motif[:, None, None],
+                      motif_aligned[:, :4],
+                      data["pos"][:, :4]))
+        data["pos"] = data["pos"].at[:, 4:].set(
+            jnp.where((t < task["align_threshold"]) * has_motif[:, None, None],
+                      motif_aligned[:, 1, None],
+                      data["pos"][:, 4:]))
+        # center positions
+        data["pos"] = data["pos"] - index_mean(data["pos"][:, 1], data["batch_index"], data["mask"][:, None])[:, None]
         # apply noise
         data.update(noise(data))
         # predict structure
         out, prev = predict(data, prev)
-        # graft motif explicitly
-        pos = out["pos"]
-        aln_motif = index_align(motif, pos, group, has_motif)
-        pos = pos.at[:, :4].set(jnp.where((t < task["align_threshold"]) * has_motif[:, None, None], aln_motif[:, :4], pos[:, :4]))
-        out["pos"] = pos
         return out, prev
     return step.apply
 
@@ -93,6 +101,11 @@ opt = parse_options(
     template_motif="False",
     use_motif_dssp="False",
     use_motif_aa="none",
+    salad_only="False",
+    redesign_motif_aa="False",
+    write_failed="False",
+    use_cycler="False",
+    mask_motif_plddt="False",
     buried_contacts=6,
     center_to_chain="False",
     timescale="ve(t, sigma_max=80.0)",
@@ -101,6 +114,8 @@ opt = parse_options(
 
 # set up output directories
 setup_directories(opt.out_path)
+if opt.use_cycler == "True":
+    os.makedirs(f"{opt.out_path}/cycles/", exist_ok=True)
 
 # get motif PDB files
 motif_paths = get_motif_paths(
@@ -144,6 +159,8 @@ af2_params = get_model_haiku_params(
 af2_config = model_config("model_1_ptm")
 af2_config.model.global_config.use_dgram = False
 af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
+cycler = af_cycler(jax.jit(make_predict(make_af2(af2_config), num_recycle=0)),
+                   pmpnn, confidence=None, fix_template=True)
 
 
 # set up output files
@@ -183,12 +200,25 @@ for motif, assembly in motif_paths:
         for ids, design in enumerate(steps):
             design = data_from_protein(si.data.to_protein(design))
             design.save_pdb(f"{opt.out_path}/attempts/{motif_name}_design_{attempt}_{ids}.pdb")
+        # shortcut for only running salad
+        if opt.salad_only == "True":
+            success_count += 1
+            continue
+        # optionally apply af2cycler
+        if opt.use_cycler == "True":
+            cycled = design
+            for idc in range(10):
+                cycled, predicted = cycler(af2_params, key, cycled, cycle_mask=~has_motif)
+                predicted.save_pdb(f"{opt.out_path}/cycles/design_{attempt}_{idc}.pdb")
+            design = cycled
         # ProteinMPNN sequence design & AF2 filter
         ca = design["atom_positions"][:, 1]
         other_ca = ca[~has_motif]
         non_motif_contact = (jnp.linalg.norm(ca[:, None] - other_ca[None, :], axis=-1) < 8.0).any(axis=1)
         motif_aa_mask = (design.aa == aa_condition) * has_motif
         motif_aa = jnp.where(motif_aa_mask, aas.translate(aa_condition, aas.AF2_CODE, aas.PMPNN_CODE), 20)
+        if opt.redesign_motif_aa == "True":
+            motif_aa = jnp.full_like(motif_aa, 20)
 
         init_info = dict(motif=motif_name, attempt=attempt)
         logit_center = pmpnn(key(), design.update(aa=motif_aa))["logits"].mean(axis=0)
@@ -214,10 +244,20 @@ for motif, assembly in motif_paths:
             af_input = AFInput.from_data(pmpnn_result).add_guess(pmpnn_result)
             if opt.template_motif == "True":
                 af_input = af_input.add_template(
-                    pmpnn_result.update(aa=data["motif_aa"]), where=has_motif)
+                    pmpnn_result.update(
+                        atom_positions=data["motif"],
+                        atom_mask=data["motif_mask"],
+                        aa=data["motif_aa"]), where=has_motif,
+                    template_sidechains=True)
             af2_result: AFResult = af2(af2_params, key(), af_input)
-            mean_plddt = af2_result.plddt.mean()
-            mean_pae = af2_result.pae.mean()
+            plddt = af2_result.plddt
+            pae = af2_result.pae
+            if opt.mask_motif_plddt == "True":
+                mean_plddt = plddt[~has_motif].mean()
+                mean_pae = pae[~has_motif][:, ~has_motif].mean()
+            else:
+                mean_plddt = plddt.mean()
+                mean_pae = pae.mean()
             rmsd_ca = RMSD(["CA"])(af2_result.to_data(), design, mask=data["mask"])
             motif_rmsd_bb = RMSD(["N", "CA", "C", "O"])(
                 af2_result.to_data(), data["motif"],
@@ -233,6 +273,8 @@ for motif, assembly in motif_paths:
             design_info["success"] = int(is_success)
             all_designs.write_line(design_info)
             if not is_success:
+                if opt.write_failed == "True":
+                    af2_result.save_pdb(f"{opt.out_path}/fail/{motif_name}_{attempt}_{idx}.pdb")
                 continue
 
             # all_designs.write_line(design_info)
