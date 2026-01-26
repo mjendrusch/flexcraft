@@ -377,6 +377,18 @@ def make_simple_assembly(pdb_path, assembly_string):
     data["segments"] = prepare_segments(data)
     return data
 
+def make_ghosts(pdb_path, ghost_string):
+    data = make_simple_assembly(pdb_path, ghost_string)
+    ghost = []
+    ghost_group = []
+    for name, segment in data["segments"].items():
+        ghost.append(segment["motif"])
+        ghost_group.append(segment["motif_group"])
+    result = dict()
+    result["ghost"] = np.concatenate(ghost, axis=0)
+    result["ghost_group"] = np.concatenate(ghost_group, axis=0)
+    return result
+
 def make_aa_condition(aatype, dmap, dmap_mask, resi_dist, task):
     if task["use_motif_aa"] == "all":
         aa_condition = aatype

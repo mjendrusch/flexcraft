@@ -123,10 +123,10 @@ def parse_target(c, path, num_aa):
 
 opt = parse_options(
     "Use salad to generate large protein complexes.",
-    salad_params="flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
-    pmpnn_params="flexcraft_params/pmpnn_params/v_48_030.pkl",
-    af2_params="flexcraft_params/af2_params",
-    alphaball_path="flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
+    salad_params="params/salad/default_ve_scaled-200k.jax", 
+    pmpnn_params="params/pmpnn/v_48_030.pkl",
+    af2_params="params/af/",
+    alphaball_path="dependencies/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
     out_path="output/",
     target="target.pdb",
     scaffold="none", # TODO: make this work for Ab design
@@ -138,24 +138,27 @@ opt = parse_options(
     num_designs=48,
     num_sequences=10,
     num_success=1,
-    radius=12.0,
+    radius=10.0,
     coldspot_radius=15.0,
     clash_radius=10.0,
     clash_lr=5e-3,
     compact_lr=1e-4,
     contact_lr=1e-2,
-    dry_run="False",
+    l_bias=0.0,
+    h_bias=0.0,
+    e_bias=0.0,
+    salad_only="False",
     relax_cutoff=3.0, # t threshold to allow target protein to move in final steps of denoising for interface refinement
     prev_threshold=0.9,
     use_cycler="False",
+    num_cycles=10, # how many iterations the af2_cycler should do
     fix_template="False",
-    af2_cycler_repeats=10, # how many iterations the af2_cycler should do
     visualize_centers="False",
     ipae_shortcut_threshold=0.35, # which ipae threshold to use for Rosetta relaxation
     allow_target_mutations="0", # number of target interface residues allowed to be redesigned by ProteinMPNN. Set to 0 to leave target sequence as is. Can take a range for random sampling, e.g. "0-3"
-    redesign_radius=10, # target residue distance for redesign in Angstrom (if target mutations are allowed). 
-    save_af2cycler_pdb="True", # whether to save all af2cycler pdb files
-    save_fail_pdb="True", # whether to save pdb files of failed designs
+    redesign_radius=10.0, # target residue distance for redesign in Angstrom (if target mutations are allowed). 
+    write_cycles="True", # whether to save all af2cycler pdb files
+    write_failed="True", # whether to save pdb files of failed designs
     seed=37,
 )
 
@@ -259,7 +262,10 @@ af2_config.model.global_config.use_dgram = False
 af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
 cycler = af_cycler(jax.jit(make_predict(make_af2(af2_config), num_recycle=0)),
                    pmpnn, confidence=None, fix_template=opt.fix_template == "True")
-filter = BindCraftProperties(opt.out_path, key, opt.af2_params, filter=opt.bindcraft_success_filter, ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
+filter = BindCraftProperties(
+    opt.out_path, key, opt.af2_params,
+    filter=opt.bindcraft_success_filter,
+    ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
 
 
 # set up pyrosetta
@@ -303,6 +309,9 @@ while success_count < opt.num_designs:
     init_data["center"] = pos_center
     init_data["pos"] = jnp.where(is_target[:, None, None], init_data["pos"], pos_center)
     init_data["aa_condition"] = aa_condition # FIXME
+    # bias secondary structure
+    init_data["dssp_mean"] = jnp.array([
+        opt.l_bias, opt.h_bias, opt.e_bias], dtype=jnp.float32)
     design = salad_sampler(salad_params, key(), init_data, init_prev)
     if isinstance(design, list):
         designs = design
@@ -314,8 +323,9 @@ while success_count < opt.num_designs:
         design = data_from_protein(
             si.data.to_protein(design))
         design.save_pdb(f"{opt.out_path}/attempts/design_{attempt}.pdb")
-    # dry run to check if designed structures are reasonable
-    if opt.dry_run == "True":
+    # salad only to check if designed structures are reasonable
+    if opt.salad_only == "True":
+        success_count += 1
         continue
     design_info = dict(attempt=attempt)
     design_info["n_target_mutations"] = 0 
@@ -323,9 +333,9 @@ while success_count < opt.num_designs:
     # optionally apply af2cycler
     if opt.use_cycler == "True":
         cycled = design
-        for idc in range(opt.af2_cycler_repeats):
+        for idc in range(opt.num_cycles):
             cycled, predicted = cycler(af2_params, key, cycled, cycle_mask=~is_target)
-            if opt.save_af2cycler_pdb == "True":
+            if opt.write_cycles == "True":
                 predicted.save_pdb(f"{opt.out_path}/cycles/design_{attempt}_{idc}.pdb")
         design = cycled
 
@@ -347,7 +357,9 @@ while success_count < opt.num_designs:
         upper_bound = int(target_mut[1])
         desired_mutations = np.random.randint(lower_bound, upper_bound + 1)
     else:
-        raise ValueError("Incorrect format for allowed_target_mut, this must be an int passed as a string (e.g. '0') or a range separated by '-', e.g. '0-3'.")
+        raise ValueError("Incorrect format for allowed_target_mut, "
+                         "this must be an int passed as a string (e.g. '0') "
+                         "or a range separated by '-', e.g. '0-3'.")
     
     # If target mutations are allowed, overwrite parts of the target_aa array.
     if desired_mutations > 0:
@@ -401,7 +413,7 @@ while success_count < opt.num_designs:
         if not properties["success"]:
             design_info["failure_reason"] = "designability"
             all_designs.write_line(design_info)
-            if opt.save_fail_pdb == "True": #made optional to save disk space
+            if opt.write_failed == "True": #made optional to save disk space
                 af2_result.save_pdb(f"{opt.out_path}/fail/design_{attempt}_{idx}.pdb")
             continue
         

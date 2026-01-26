@@ -14,14 +14,15 @@ def position_lddt_ca(x: jax.Array, target: jax.Array,
     """Compute LDDT-CA given target coordinates `target` and predicted coordinates `x`.
     
     Args:
-        x: predicted coordinates
-        target: target coordinates.
+        x: predicted coordinates. float32 Array of shape ``(N, M, 3)``, where
+           ``x[:, 1]`` should yield the CA coordinates of an amino acid residue.
+        target: target coordinates. float32 Array of shape ``(N, M, 3)``.
         local_distance: distance threshold for LDDT in Angstroms. Default: 15.0.
         thresholds: LDDT error thresholds in Angstroms to be averaged over.
             Default: (0.5, 1.0, 2.0, 4.0).
-        mask: optional boolean array mask of positions to consider for LDDT.
+        mask: optional mask of positions to consider for LDDT. bool Array of shape ``(N)``.
     Returns:
-        lddt: float32 array of shape `(x.shape[0],)`, containing LDDT between 0.0 and 1.0
+        float32 Array of shape `(x.shape[0],)`: , containing LDDT between 0.0 and 1.0
             for each residue.
     """
     if x.ndim == 3:
@@ -41,7 +42,23 @@ def position_lddt_ca(x: jax.Array, target: jax.Array,
     return lddt
 
 def lddt(x: Any, target: jax.Array | DesignData) -> jax.Array:
-    """Compute LDDT-CA for DesignData or compatible objects."""
+    """Compute LDDT-CA for DesignData or compatible objects.
+    
+    Args:
+        x: predicted structure.
+            `DesignData` object with N residues, any object convertible to
+            `DesignData` using a `to_data` method (e.g. `AFResult`) or
+            float32 ``Array`` of shape ``N, M, 3``.
+        target: reference structure.
+            `DesignData` compatible object with N residues,
+            or float32 position `Array` of shape ``(N, M, 3)``,
+            where target[:, 1] contains reference CA positions.
+    
+    Returns:
+        float32 Array of shape (N,): residue pLDDT
+            Array containing pLDDT values for each residue in the
+            range [0, 1].
+    """
     mask = 1
     if hasattr(x, "to_data"):
         x = x.to_data()
@@ -59,7 +76,23 @@ def lddt(x: Any, target: jax.Array | DesignData) -> jax.Array:
     return position_lddt_ca(x, target, mask=mask)
 
 def sc_lddt(x: Any, target: jax.Array | DesignData) -> jax.Array:
-    """Compute self-consistent LDDT (LDDT * pLDDT) for DesignData or compatible objects.."""
+    """Compute self-consistent LDDT (LDDT * pLDDT) for DesignData or compatible objects.
+    
+    Args:
+        x: predicted structure.
+            `DesignData` object with N residues, any object convertible to
+            `DesignData` using a `to_data` method (e.g. `AFResult`) or
+            float32 ``Array`` of shape ``N, M, 3``.
+        target: reference structure.
+            `DesignData` compatible object with N residues,
+            or float32 position `Array` of shape ``(N, M, 3)``,
+            where target[:, 1] contains reference CA positions.
+
+    Returns:
+        float32 Array of shape (N,): residue scLDDT
+            Array containing self-consistent LDDT values for each
+            residue in the range [0, 1].
+    """
     if isinstance(x, dict):
         positions = x["atom_positions"]
         plddt = x["plddt"]

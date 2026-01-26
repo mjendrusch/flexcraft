@@ -9,7 +9,7 @@ from collections import defaultdict
 
 from flexcraft.pipelines.graft.common import (
     setup_directories, get_assembly_lengths, sample_data,
-    make_simple_assembly, get_motif_paths, make_aa_condition)
+    make_simple_assembly, make_ghosts, get_motif_paths, make_aa_condition)
 from flexcraft.pipelines.graft.options import MODEL_OPTIONS, SAMPLER_OPTIONS
 from flexcraft.utils import *
 from flexcraft.files.csv import ScoreCSV
@@ -22,6 +22,21 @@ from flexcraft.structure.metrics import RMSD
 import salad.inference as si
 
 from salad.modules.utils.geometry import positions_to_ncacocb, index_align, index_mean
+
+def condition_step(config):
+    config = deepcopy(config)
+    config.eval = True
+    @hk.transform
+    def step(data, prev):
+        # set up salad models
+        noise = si.StructureDiffusionNoise(config)
+        predict = si.StructureDiffusionPredict(config)
+        # apply noise
+        data.update(noise(data))
+        # denoise
+        out, prev = predict(data, prev)
+        return out, prev
+    return step.apply
 
 def model_step(config, task):
     config = deepcopy(config)
@@ -65,6 +80,21 @@ def model_step(config, task):
             t >= task["grad_threshold"],
             t * jax.grad(restraint_indexed, argnums=(0,))(pos[:, 1])[0][:, None],
             0.0)
+        # ghost chain gradients
+        if "ghost" in data:
+            ghost, ghost_group = data["ghost"], data["ghost_group"]
+            aln_ghost = index_align(
+                jnp.concatenate((motif, ghost), axis=0),
+                jnp.concatenate((pos, jnp.zeros([ghost.shape[0]] + list(pos.shape[1:]))), axis=0),
+                jnp.concatenate((group, ghost_group), axis=0),
+                jnp.concatenate((has_motif, jnp.ones((ghost.shape[0],), dtype=jnp.bool_)), axis=0),
+                jnp.concatenate((has_motif, jnp.zeros((ghost.shape[0],))), axis=0))
+            ghost_ca = aln_ghost[has_motif.shape[0]:, 1]
+            def ghost_repulsive(ca):
+                distance = jnp.sqrt(jnp.maximum(3e-4, (ca[:, None] - ghost_ca[None, :]) ** 2).sum(axis=-1))
+                return ((jax.nn.relu(12.0 - distance) ** 1.5).sum(axis=1) * (1 - has_motif) * data["mask"]).sum()# / jnp.maximum(1, data["mask"].sum())
+            pos -= task["potentials"]["ghost_repulsive"] * t * jax.grad(ghost_repulsive, argnums=(0,))(pos[:, 1])[0][:, None]
+        pos += task["potentials"]["compact"] * t * si.contacts.compact_step(pos, data["chain_index"], data["mask"])
         data["pos"] = pos
         # graft motif explicitly
         motif_aligned = index_align(motif, data["pos"], group, has_motif)
@@ -93,19 +123,27 @@ opt = parse_options(
     out_path="outputs/",
     motif_path="motifs/",
     assembly="20-50,A1-20@0,20-50",
-    grad_threshold=1.0,
-    align_threshold=0.0,
-    dmap_threshold=1.0,
+    condition_dssp="False",
+    h_bias=0.0,
+    e_bias=0.0,
+    l_bias=0.0,
+    af_drop_chains="none",
+    ghosts="none",
+    ghost_repulsive_lr=0.0,
+    ghost_attractive_lr=0.0,
+    grad_threshold=2.0,
+    align_threshold=2.0,
+    dmap_threshold=0.5,
     compact_lr=0.0,
     clash_lr=0.0,
     template_motif="False",
     use_motif_dssp="False",
-    use_motif_aa="none",
+    use_motif_aa="all",
     salad_only="False",
     redesign_motif_aa="False",
     write_failed="False",
     use_cycler="False",
-    mask_motif_plddt="False",
+    mask_motif_plddt="True",
     buried_contacts=6,
     center_to_chain="False",
     timescale="ve(t, sigma_max=80.0)",
@@ -127,7 +165,8 @@ key = Keygen(opt.seed)
 # model setup
 task = defaultdict(
     lambda: None, mode=["grad"], 
-    potentials=dict(compact=opt.compact_lr, clash=opt.clash_lr),
+    potentials=dict(compact=opt.compact_lr, clash=opt.clash_lr,
+                    ghost_repulsive=opt.ghost_repulsive_lr),
     grad_threshold=opt.grad_threshold,
     align_threshold=opt.align_threshold,
     dmap_threshold=opt.dmap_threshold,
@@ -137,6 +176,10 @@ task = defaultdict(
     center_to_chain=opt.center_to_chain == "True")
 salad_config, salad_params = si.make_salad_model(
     opt.salad_config, opt.salad_params)
+condition_sampler = si.Sampler(condition_step(salad_config),
+                               prev_threshold=opt.prev_threshold,
+                               out_steps=400,
+                               timescale=opt.timescale)
 salad_sampler = si.Sampler(model_step(salad_config, task),
                            prev_threshold=opt.prev_threshold,
                            out_steps=[400],
@@ -181,6 +224,10 @@ for motif, assembly in motif_paths:
     motif_name = ".".join(os.path.basename(motif).split(".")[:-1])
     # get settings dictionary for a motif and simple assembly specification
     settings = make_simple_assembly(motif, assembly)
+    # get ghost chains, if available
+    ghost_data = dict()
+    if opt.ghosts != "none":
+        ghost_data = make_ghosts(motif, opt.ghosts)
     # get the maximum length of designs with that specification
     _, max_length = get_assembly_lengths(
         settings["segments"], settings["assembly"])
@@ -189,19 +236,38 @@ for motif, assembly in motif_paths:
     while True:
         if success_count >= opt.num_designs:
             break
+        # sample motif scaffolding task
+        # if random lengths were provided, a specific length will be sampled
         data, init_prev = sample_data(
             salad_config, settings["segments"], settings["assembly"],
             pos_init=True)
-        has_motif = data["has_motif"]
-        aa_condition = data["motif_aa"]
         data = pad_dict(data, max_length)
         init_prev = pad_dict(init_prev, max_length)
+        # bias secondary structure
+        data["dssp_mean"] = jnp.array([
+            opt.l_bias, opt.h_bias, opt.e_bias], dtype=jnp.float32)
+        has_motif = data["has_motif"]
+        aa_condition = data["motif_aa"]
+        if opt.condition_dssp == "True":
+            # NOTE: this is currently experimental
+            cond_data = slice_dict(data, data["chain_index"] == 0)
+            cond_prev = slice_dict(init_prev, data["chain_index"] == 0)
+            design = condition_sampler(salad_params, key(), cond_data, cond_prev)
+            design = data_from_protein(si.data.to_protein(design))
+            dssp = design.dssp
+            dssp = jnp.where(dssp == 0, 3, dssp)
+            dssp = jnp.where(cond_data["has_motif"], 3, dssp)
+            dssp = jnp.concatenate((dssp, jnp.zeros((has_motif.shape[0] - dssp.shape[0],), dtype=jnp.int32)))
+            data["dssp_condition"] = dssp
+        # add ghost chain info if available
+        data.update(ghost_data)
         steps = salad_sampler(salad_params, key(), data, init_prev)
         for ids, design in enumerate(steps):
             design = data_from_protein(si.data.to_protein(design))
             design.save_pdb(f"{opt.out_path}/attempts/{motif_name}_design_{attempt}_{ids}.pdb")
         # shortcut for only running salad
         if opt.salad_only == "True":
+            attempt += 1
             success_count += 1
             continue
         # optionally apply af2cycler
@@ -241,6 +307,11 @@ for motif, assembly in motif_paths:
             pmpnn_result = pmpnn_input.update(
                 aa=aas.translate(pmpnn_result["aa"], aas.PMPNN_CODE, aas.AF2_CODE))
             # run AF2 filter
+            if opt.af_drop_chains != "none":
+                drop_chains = np.array([int(c) for c in opt.af_drop_chains.strip().split(",")], dtype=np.int32)
+                selector = ~(data["chain_index"][:, None] == drop_chains).any()
+                data = slice_dict(data, selector)
+                pmpnn_result = pmpnn_result[selector]
             af_input = AFInput.from_data(pmpnn_result).add_guess(pmpnn_result)
             if opt.template_motif == "True":
                 af_input = af_input.add_template(
