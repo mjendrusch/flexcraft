@@ -13,11 +13,24 @@ from flexcraft.rosetta.interface_analyzer import score_interface
 from salad.modules.utils.geometry import index_align
 
 class BindCraftProperties:
-    def __init__(self, path, key, af_parameter_path, filter=None,
-                 use_guess=False, relaxed_name="relaxed"):
+    def __init__(self, path, key, af_parameter_path, filter=None, 
+                 use_guess=False, relaxed_name="relaxed", ipae_shortcut_threshold=0.35):
+        
+        AVAILABLE_FILTERS = {"default": default_filter}
+
         if filter is None:
-            filter = default_filter
-        # self.config = config # FIXME: Add config
+            xfilter = default_filter
+        elif isinstance(filter, str):
+            if filter in AVAILABLE_FILTERS: 
+                xfilter = AVAILABLE_FILTERS[filter]
+            else: 
+                raise ValueError(f"ERROR: The provided filter '{filter}' is not a valid filter option. Available filters are: {list(AVAILABLE_FILTERS.keys())}.")
+        elif callable(filter):
+            xfilter=filter
+        else:
+            raise ValueError("ERROR: The 'filter' argument must be a string, a callable function, or None.")
+
+        self.ipae_shortcut_threshold = ipae_shortcut_threshold
         self.path = path
         self.relaxed_name = relaxed_name
         self.af2_params = [
@@ -30,8 +43,8 @@ class BindCraftProperties:
         self.use_guess = use_guess
         self.af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
         self.key = key
-        self.filter = filter
-
+        self.filter=xfilter
+    
     def __call__(self, name, design: DesignData, is_target: jnp.ndarray):
         # c = self.config
         af_input = (AFInput
@@ -62,8 +75,7 @@ class BindCraftProperties:
                            name: str,
                            af_result: AFResult,
                            design: DesignData,
-                           is_target: jnp.ndarray,
-                           ipae_shortcut_threshold=0.35) -> dict:
+                           is_target: jnp.ndarray,) -> dict:
         result = dict()
         is_binder = ~is_target
         pair_is_binder = is_binder[:, None] * is_binder[None, :]
@@ -78,7 +90,7 @@ class BindCraftProperties:
         result["Binder_pAE"] = (af_result.pae * pair_is_binder).sum() / jnp.maximum(pair_is_binder.sum(), 1)
         result["i_pAE"] = af_result.ipae
         # FIXME if pass, relax the af2 structure. Else, continue
-        if result["i_pAE"] >= ipae_shortcut_threshold:
+        if result["i_pAE"] >= self.ipae_shortcut_threshold:
             result.update({
                 'Binder_Energy_Score': np.nan,
                 'Surface_Hydrophobicity': np.nan,

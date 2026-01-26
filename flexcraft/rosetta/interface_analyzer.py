@@ -24,9 +24,12 @@
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+from copy import deepcopy
 
 import pyrosetta as pr
 from pyrosetta.rosetta.core.select.residue_selector import ChainSelector
+
 from pyrosetta.rosetta.protocols.analysis import InterfaceAnalyzerMover
 from pyrosetta.rosetta.protocols.rosetta_scripts import XmlObjects
 
@@ -38,7 +41,19 @@ def score_interface(pdb_file: PDBFile | str, is_target):
     # load pose
     if isinstance(pdb_file, str):
         pdb_file = PDBFile(path=str)
-    pose = pr.pose_from_pdb(pdb_file.path)
+    
+    # Rosetta crashes if more than 3 chains are present in the pose
+    # Relabel all target chains to chain A and renumber residues, relabel binder to chain B
+    # If multiple binders are generated, these will all be relabelled to chain B and renumbered
+
+    rosetta_data = deepcopy(pdb_file.data)
+    rosetta_data["chain_index"][is_target] = 0 # all target chains are now chain A
+    rosetta_data["residue_index"][is_target] = np.arange(1, np.sum(is_target) + 1) #renumber target residues
+    rosetta_data["chain_index"][~is_target] = 1 # binder is now chain B
+    rosetta_data["residue_index"][~is_target] = np.arange(1, np.sum(~is_target) + 1) #renumber binder residues
+
+    calc_pdb = PDBFile(data=rosetta_data, prefix="interface_calc_")
+    pose = pr.pose_from_pdb(calc_pdb.path)
 
     # analyze interface statistics
     iam = InterfaceAnalyzerMover()
@@ -57,9 +72,11 @@ def score_interface(pdb_file: PDBFile | str, is_target):
     interface_AA = {aa: 0 for aa in 'ACDEFGHIKLMNPQRSTVWY'}
 
     # Initialize list to store PDB residue IDs at the interface
-    data: DesignData = pdb_file.data
+    # We also use the pdb file with re-labelled residues here
+    data: DesignData = calc_pdb.data
+
     target_data = data[is_target]
-    binder_data = data[~is_target]
+    binder_data = data[(~is_target)]
     hotspot = jnp.linalg.norm(target_data["atom_positions"][:, None, 1] - binder_data["atom_positions"][None, :, 1], axis=-1)
     hotspot = (hotspot < 8.0).any(axis=1)
     aa = aas.decode(target_data["aa"][hotspot], aas.AF2_CODE)
@@ -97,9 +114,11 @@ def score_interface(pdb_file: PDBFile | str, is_target):
     else:
         interface_hbond_percentage = 0
         interface_bunsch_percentage = 100
+    
     # calculate binder energy score
-    binder_chain = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[data["chain_index"][-1]]
+    binder_chain = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[data["chain_index"][-1]] # binder is the last chain, this could also just be "B" since we relabelled anyways
     chain_design = ChainSelector(binder_chain)
+    
     tem = pr.rosetta.core.simple_metrics.metrics.TotalEnergyMetric()
     tem.set_scorefunction(scorefxn)
     tem.set_residue_selector(chain_design)
@@ -157,5 +176,7 @@ def score_interface(pdb_file: PDBFile | str, is_target):
 
     # round to two decimal places
     interface_scores = {k: round(v, 2) if isinstance(v, float) else v for k, v in interface_scores.items() if v is not None} # FIXME
+    # remove temporary file with relabelled chains
+    calc_pdb.remove() 
 
     return interface_scores, interface_AA

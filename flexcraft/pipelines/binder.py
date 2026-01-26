@@ -1,4 +1,3 @@
-
 import os
 import shutil
 import gemmi
@@ -8,6 +7,7 @@ import random
 import haiku as hk
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from Bio.SeqUtils.IsoelectricPoint import IsoelectricPoint as IP
 
@@ -76,16 +76,15 @@ def model_step(config):
         # FIXME: center the entire thing
         # data["pos_noised"] -= data["pos_noised"][:, 1].mean(axis=0)
         out, prev = predict(data, prev)
-        # FIXME start: move around target, so it stays centered
-        # use alignment for that?
+        N = out["pos"].shape[0]
+        align_index = jnp.zeros((N,), dtype=jnp.int32)
+        align_mask = jnp.array(is_target, dtype=jnp.float32)
+        align_weight = None
         out["pos"] = index_align(
             out["pos"], base_pos,
-            index=jnp.zeros_like(data["batch_index"]),
-            mask=jnp.ones_like(data["batch_index"], dtype=jnp.bool_),
-            weight=is_target.astype(jnp.float32))
-        # target_center = out["pos"][:config.target_size, 1].mean(axis=0)
-        # out["pos"] -= target_center
-        # FIXME end.
+            index=align_index,
+            mask=align_mask,
+            weight=align_weight)
         out["pos"] = jnp.where(
             t > config.relax_cutoff,
             out["pos"].at[:config.target_size, :5].set(base_pos[:config.target_size, :5]), out["pos"])
@@ -124,19 +123,18 @@ def parse_target(c, path, num_aa):
 
 opt = parse_options(
     "Use salad to generate large protein complexes.",
-    salad_params="salad_params/default_ve_scaled-200k.jax",
-    pmpnn_params="pmpnn_params/v_48_030.pkl",
-    af2_params="./",
-    boltz_path="../../flexcraft/",
-    alphaball_path="/g/korbel/mjendrusch/repos/bindcraft_test_env/BindCraft/functions/DAlphaBall.gcc",
+    salad_params="flexcraft_params/salad_params/default_ve_scaled-200k.jax", 
+    pmpnn_params="flexcraft_params/pmpnn_params/v_48_030.pkl",
+    af2_params="flexcraft_params/af2_params",
+    alphaball_path="flexcraft_params/DAlphaBall.gcc", # get this file from BindCraft GitHub and make executable before running
     out_path="output/",
-    boltz_gpu=1,
     target="target.pdb",
     scaffold="none", # TODO: make this work for Ab design
     scaffold_relax_cutoff=-1.0,
     hotspots="none",
     coldspots="none",
     num_aa=50,
+    bindcraft_success_filter="default", # default is just bindcraft filter, can be expanded by adding filters to bindcraft_filter.py function
     num_designs=48,
     num_sequences=10,
     num_success=1,
@@ -147,13 +145,20 @@ opt = parse_options(
     compact_lr=1e-4,
     contact_lr=1e-2,
     dry_run="False",
-    relax_cutoff=3.0,
+    relax_cutoff=3.0, # t threshold to allow target protein to move in final steps of denoising for interface refinement
     prev_threshold=0.9,
     use_cycler="False",
     fix_template="False",
+    af2_cycler_repeats=10, # how many iterations the af2_cycler should do
     visualize_centers="False",
+    ipae_shortcut_threshold=0.35, # which ipae threshold to use for Rosetta relaxation
+    allow_target_mutations="0", # number of target interface residues allowed to be redesigned by ProteinMPNN. Set to 0 to leave target sequence as is. Can take a range for random sampling, e.g. "0-3"
+    redesign_radius=10, # target residue distance for redesign in Angstrom (if target mutations are allowed). 
+    save_af2cycler_pdb="True", # whether to save all af2cycler pdb files
+    save_fail_pdb="True", # whether to save pdb files of failed designs
     seed=37,
 )
+
 
 # set up output directories
 os.makedirs(f"{opt.out_path}/attempts/", exist_ok=True)
@@ -223,7 +228,6 @@ config.radius = opt.radius
 config.relax_cutoff = opt.relax_cutoff
 config.target_size = target_size
 monomer_num_aa = opt.num_aa
-num_chains = 2 # FIXME
 init_data, init_prev = si.data.from_config(
     config, num_aa=num_aa, chain_index=chain,
     residue_index=resi, cyclic_mask=cyclic_mask,
@@ -255,17 +259,15 @@ af2_config.model.global_config.use_dgram = False
 af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
 cycler = af_cycler(jax.jit(make_predict(make_af2(af2_config), num_recycle=0)),
                    pmpnn, confidence=None, fix_template=opt.fix_template == "True")
-filter = BindCraftProperties(opt.out_path, key, opt.af2_params)
+filter = BindCraftProperties(opt.out_path, key, opt.af2_params, filter=opt.bindcraft_success_filter, ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
+
 
 # set up pyrosetta
 pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball {opt.alphaball_path} -corrections::beta_nov16 true -relax:default_repeats 1')
 
 # set up output files
 score_keys = (
-    "attempt", "seq_id", "sequence",
-    "sc_rmsd", "plddt", "ipae", "iptm",
-    "ipsae", "sap",
-    "success", "failure_reason"
+    "attempt", "seq_id", "target_seq","binder_seq","n_target_mutations","success", "failure_reason"
 )
 score_keys = list(score_keys) + [
     f"{i}_{name}"
@@ -316,20 +318,50 @@ while success_count < opt.num_designs:
     if opt.dry_run == "True":
         continue
     design_info = dict(attempt=attempt)
+    design_info["n_target_mutations"] = 0 
     init_info = design_info
     # optionally apply af2cycler
     if opt.use_cycler == "True":
         cycled = design
-        for idc in range(10):
+        for idc in range(opt.af2_cycler_repeats):
             cycled, predicted = cycler(af2_params, key, cycled, cycle_mask=~is_target)
-            predicted.save_pdb(f"{opt.out_path}/cycles/design_{attempt}_{idc}.pdb")
+            if opt.save_af2cycler_pdb == "True":
+                predicted.save_pdb(f"{opt.out_path}/cycles/design_{attempt}_{idc}.pdb")
         design = cycled
-    # identify contact residues to design
+
+    # identify contact residues
     ca = design["atom_positions"][:, 1]
-    dist = np.linalg.norm(ca[is_target, None] - ca[None, ~is_target], axis=-1)
-    in_range = (dist < 8).any(axis=1)
-    in_range = jnp.concatenate((in_range, jnp.zeros((opt.num_aa,), dtype=jnp.bool_)), axis=0)
-    target_aa = jnp.where(is_target > 0, aas.translate(aa_condition, aas.AF2_CODE, aas.PMPNN_CODE), 20)
+    dist_matrix = np.linalg.norm(ca[is_target, None] - ca[None, ~is_target], axis=-1)
+    
+    # Create a mask for target residues at the interface (e.g., within 10A of any binder residue)
+    is_interface_target = (dist_matrix < opt.redesign_radius).any(axis=1) 
+    # Create the base input for MPNN: binders are masked (20), target is fixed.
+    target_aa = jnp.where(is_target, aas.translate(aa_condition, aas.AF2_CODE, aas.PMPNN_CODE), 20)
+
+    # determine the desired number of target mutations for this specific design: 
+    target_mut = opt.allow_target_mutations.split("-")
+    if len(target_mut) == 1:
+        desired_mutations = int(target_mut[0])
+    elif len(target_mut) == 2: 
+        lower_bound = int(target_mut[0])
+        upper_bound = int(target_mut[1])
+        desired_mutations = np.random.randint(lower_bound, upper_bound + 1)
+    else:
+        raise ValueError("Incorrect format for allowed_target_mut, this must be an int passed as a string (e.g. '0') or a range separated by '-', e.g. '0-3'.")
+    
+    # If target mutations are allowed, overwrite parts of the target_aa array.
+    if desired_mutations > 0:
+        interface_indices = jnp.where(is_interface_target)[0]
+        # Randomly choose a subset of these unique local residues to mutate
+        num_to_mutate = min(len(interface_indices), desired_mutations)
+        
+        if num_to_mutate > 0:
+            # log number to output csv
+            design_info["n_target_mutations"] = num_to_mutate 
+            selected_indices = np.random.choice(interface_indices, size=num_to_mutate, replace=False)
+            # Mask these chosen residues in the MPNN input array by setting them to 20
+            target_aa = target_aa.at[selected_indices].set(20)
+
     # get center for PMPNN
     logit_center = pmpnn(key(), design.update(aa=target_aa))["logits"][target_size:].mean(axis=0)
     num_sequences = opt.num_sequences
@@ -349,15 +381,30 @@ while success_count < opt.num_designs:
         pmpnn_result, _ = pmpnn_sampler(key(), pmpnn_input)
         pmpnn_result = pmpnn_input.update(
             aa=aas.translate(pmpnn_result["aa"], aas.PMPNN_CODE, aas.AF2_CODE))
+        
+        # write target and binder seq to output csv
+        af2_aa_order = "ARNDCQEGHILKMFPSTWYV" # standard af2 code
+        seq_indices = np.array(pmpnn_result["aa"]).flatten()
+        target_all_indices = seq_indices[is_target] # extract target sequence
+        target_seq = "".join([af2_aa_order[i] if i < 20 else "X" for i in target_all_indices])
+
+        binder_all_indices = seq_indices[~is_target] # extract binder sequences
+        binder_seq = "".join([af2_aa_order[i] if i < 20 else "X" for i in binder_all_indices])
+
+        design_info.update(target_seq=target_seq, binder_seq=binder_seq)
+
         # run bindcraft filter
         af2_result, properties = filter(f"design_{attempt}_{idx}", pmpnn_result, is_target=is_target)
         design_info.update(properties)
         design_info["success"] = int(design_info["success"])
+
         if not properties["success"]:
             design_info["failure_reason"] = "designability"
             all_designs.write_line(design_info)
-            af2_result.save_pdb(f"{opt.out_path}/fail/design_{attempt}_{idx}.pdb")
+            if opt.save_fail_pdb == "True": #made optional to save disk space
+                af2_result.save_pdb(f"{opt.out_path}/fail/design_{attempt}_{idx}.pdb")
             continue
+        
         design_info.update(success=1, failure_reason="none")
         all_designs.write_line(design_info)
         success.write_line(design_info)
