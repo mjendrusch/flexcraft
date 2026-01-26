@@ -70,16 +70,21 @@ def model_step(config):
         # apply compact and clash steps scaled by noise standard deviation
         pos = pos + t * (compact_step + clash_step + contact_step)
         #pos = jnp.where((chain == chain.max())[:, None, None], pos + t * (compact_step + clash_step), pos)
+        # center positions prior to noising
+        pos = pos - index_mean(pos[:, 1], data["batch_index"], data["mask"][:, None])[:, None]
         data["pos"] = pos
         # apply noise
         data.update(noise(data))
-        # FIXME: center the entire thing
-        # data["pos_noised"] -= data["pos_noised"][:, 1].mean(axis=0)
         out, prev = predict(data, prev)
         N = out["pos"].shape[0]
         align_index = jnp.zeros((N,), dtype=jnp.int32)
-        align_mask = jnp.array(is_target, dtype=jnp.float32)
-        align_weight = None
+        # NOTE: do not code while sleep deprived.
+        # you will write bugs.
+        #
+        # align output to target, using only target
+        # amino acids for alignment.
+        align_mask = data["mask"]
+        align_weight = jnp.array(is_target, dtype=jnp.float32)
         out["pos"] = index_align(
             out["pos"], base_pos,
             index=align_index,
