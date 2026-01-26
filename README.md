@@ -56,7 +56,7 @@ This directory structure is common to all [pipelines](#pipelines) currently impl
     pipeline for more involved motif scaffolding tasks, with shape
     or symmetry requirements, large motifs (>50 residues)
 - binder design:
-  - [`flexcraft.pipelines.binders`](docs/pipeline_binders.md)
+  - [`flexcraft.pipelines.binders`](docs/pipeline_binder.md)
 - unconditional *de novo* design:
   - [`flexcraft.pipelines.denovo`](docs/pipeline_denovo.md)
 
