@@ -32,7 +32,7 @@ python -c 'import pyrosetta_installer; pyrosetta_installer.install_pyrosetta()'
 ### Getting your 1st protein
 Check if `flexcraft` is working properly on your machine / GPU by having it design a protein *de novo*:
 ```bash
-python -m flexcraft.pipelines.denovo --num_aa "100" --num_designs 10 --out_path test_outputs/
+python -m flexcraft.pipelines.denovo --num_aa "100" --num_designs 10 --out_path test_runs/denovo-100-1/
 ```
 If your machine has more than 1 GPU, consider using `CUDA_VISIBLE_DEVICES=0` to restrict the script to
 the first GPU on the machine.
