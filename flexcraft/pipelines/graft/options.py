@@ -1,9 +1,9 @@
 
 MODEL_OPTIONS = dict(
     salad_config="default_ve_scaled",
-    salad_params="salad_params/default_ve_scaled-200k.jax",
-    pmpnn_params="pmpnn_params/v_48_030.pkl",
-    af2_params="./",
+    salad_params="params/salad/default_ve_scaled-200k.jax",
+    pmpnn_params="params/pmpnn/v_48_030.pkl",
+    af2_params="params/af/",
 )
 SAMPLER_OPTIONS = dict(
     scaffold_relax_cutoff=-1.0,

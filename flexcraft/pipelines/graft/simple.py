@@ -147,7 +147,11 @@ opt = parse_options(
     buried_contacts=6,
     center_to_chain="False",
     timescale="ve(t, sigma_max=80.0)",
-    seed=42
+    f_motif_bb_rmsd=2.0,
+    f_plddt=0.8,
+    f_sc_rmsd=2.0,
+    f_pae=0.25
+    seed=42,
 )
 
 # set up output directories
@@ -340,7 +344,7 @@ for motif, assembly in motif_paths:
                 sc_rmsd=rmsd_ca,
                 motif_rmsd=motif_rmsd_bb
             )
-            is_success = mean_plddt > 0.8 and mean_pae < 0.25 and rmsd_ca < 2.0
+            is_success = mean_plddt > opt.f_plddt and mean_pae < opt.f_pae and rmsd_ca < opt.f_sc_rmsd and motif_rmsd_bb < opt.f_motif_rmsd
             design_info["success"] = int(is_success)
             all_designs.write_line(design_info)
             if not is_success:

@@ -12,9 +12,9 @@ To design scaffolds for a part of PD-1 at
 python -m flexcraft.pipelines.graft.simple \
     --motif_path examples/binder_targets/pd1_hniu.pdb \
     --out_path test_runs/motif-pd1-1/ \
-    --assembly "50:A111-117:50:A121-127:50" \
+    --assembly "50,A111-117,50,A121-127,50" \
     --num_designs 10 --use_motif_aa all \
-    --config default_vp --salad_params params/salad/default_vp-200k.jax \
+    --salad_config default_vp --salad_params params/salad/default_vp-200k.jax \
     --timescale "cosine(t)"
 ```
 
@@ -123,3 +123,8 @@ structure created after running `download_params.sh`.
     should be `cosine(t)`. For variance-expanding checkpoints (ve),
     should be `ve(t)`.
 - `--seed`: `jax` starting random seed
+### filter settings
+- `f_plddt`: Filter minimum pLDDT. Default: 0.8.
+- `f_sc_rmsd`: Filter maximum scRMSD. Default: 2.0.
+- `f_pae`: Filter maximum normalized pAE. Default: 0.25.
+- `f_motif_bb_rmsd`: Filter maximum motif backbone RMSD. Default: 2.0.
