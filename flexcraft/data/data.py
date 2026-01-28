@@ -10,6 +10,7 @@ import numpy as np
 
 from salad.aflib.common.protein import Protein, to_pdb
 from salad.modules.utils.dssp import assign_dssp
+from salad.modules.utils.geometry import index_align
 from salad.aflib.model.all_atom_multimer import atom14_to_atom37, get_atom37_mask
 
 import tree
@@ -351,6 +352,21 @@ class DesignData:
     def __truediv__(self, other: "DesignData") -> "DesignData":
         """Complex of chains with consecutive chain indices."""
         return type(self).concatenate([self, other], sep_chains=True)
+
+    def align_to(self, other: "DesignData"|Array,
+                 mask: Array | None = None,
+                 weight: Array | None = None) -> "DesignData":
+        """Align to another ``DesignData`` object, or coordinate ``Array``."""
+        if isinstance(other, DesignData):
+            other = other["atom_positions"]
+            mask = other["atom_mask"].any(axis=1)
+        return self.update(
+            atom_positions=jnp.where(
+                self["atom_mask"][..., None],
+                index_align(self["atom_positions"], other,
+                            jnp.zeros_like(mask, dtype=jnp.int32),
+                            mask, weight=weight),
+                0.0))
 
     def to_protein(self, b_factors=None):
         """Turn a DesignData object into an AlphaFold2 Protein object."""

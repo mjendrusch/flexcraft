@@ -46,8 +46,13 @@ structure created after running `download_params.sh`.
     write AF2 predictions of failed designs? "True" or "False".
     Default: "False".
 - `--salad_only`:
-    only run and write `salad` outputs? "True" of "False".
+    only run and write `salad` outputs? "True" or "False".
     Default: "False".
+- `--align_final_to_motif`:
+    make sure motifs in the output PDB files are aligned to
+    their positions in the motif PDB file.
+    Only works with one motif group / no motif group specification.
+    "True" or "False". Default: "False".
 ### motif settings
 - `--assembly`:
     assembly string specifying how motifs should be scaffolded.

@@ -97,15 +97,28 @@ def model_step(config, task):
         pos += task["potentials"]["compact"] * t * si.contacts.compact_step(pos, data["chain_index"], data["mask"])
         data["pos"] = pos
         # graft motif explicitly
-        motif_aligned = index_align(motif, data["pos"], group, has_motif)
-        data["pos"] = data["pos"].at[:, :4].set(
-            jnp.where((t < task["align_threshold"]) * has_motif[:, None, None],
-                      motif_aligned[:, :4],
-                      data["pos"][:, :4]))
-        data["pos"] = data["pos"].at[:, 4:].set(
-            jnp.where((t < task["align_threshold"]) * has_motif[:, None, None],
-                      motif_aligned[:, 1, None],
-                      data["pos"][:, 4:]))
+        # aligning the denoised structure to the motif
+        if task["reverse_align"]:
+            pos_aligned = index_align(data["pos"], motif, group, has_motif)
+            data["pos"] = pos_aligned.at[:, :4].set(
+                jnp.where((t < task["align_threshold"]) * has_motif[:, None, None],
+                        motif[:, :4],
+                        pos_aligned[:, :4]))
+            data["pos"] = data["pos"].at[:, 4:].set(
+                jnp.where((t < task["align_threshold"]) * has_motif[:, None, None],
+                        motif[:, 1, None],
+                        data["pos"][:, 4:]))
+        # or aligning the motif to the denoised structure (default)
+        else:
+            motif_aligned = index_align(motif, data["pos"], group, has_motif)
+            data["pos"] = data["pos"].at[:, :4].set(
+                jnp.where((t < task["align_threshold"]) * has_motif[:, None, None],
+                        motif_aligned[:, :4],
+                        data["pos"][:, :4]))
+            data["pos"] = data["pos"].at[:, 4:].set(
+                jnp.where((t < task["align_threshold"]) * has_motif[:, None, None],
+                        motif_aligned[:, 1, None],
+                        data["pos"][:, 4:]))
         # center positions
         data["pos"] = data["pos"] - index_mean(data["pos"][:, 1], data["batch_index"], data["mask"][:, None])[:, None]
         # apply noise
@@ -134,6 +147,8 @@ opt = parse_options(
     grad_threshold=2.0,
     align_threshold=2.0,
     dmap_threshold=0.5,
+    align_final_to_motif="False",
+    reverse_align="False",
     compact_lr=0.0,
     clash_lr=0.0,
     template_motif="False",
@@ -147,10 +162,10 @@ opt = parse_options(
     buried_contacts=6,
     center_to_chain="False",
     timescale="ve(t, sigma_max=80.0)",
-    f_motif_bb_rmsd=2.0,
+    f_motif_rmsd=2.0,
     f_plddt=0.8,
     f_sc_rmsd=2.0,
-    f_pae=0.25
+    f_pae=0.25,
     seed=42,
 )
 
@@ -268,6 +283,9 @@ for motif, assembly in motif_paths:
         steps = salad_sampler(salad_params, key(), data, init_prev)
         for ids, design in enumerate(steps):
             design = data_from_protein(si.data.to_protein(design))
+            if opt.align_final_to_motif == "True":
+                design = design.align_to(
+                    data["motif"], data["mask"], weight=data["has_motif"].astype(jnp.float32))
             design.save_pdb(f"{opt.out_path}/attempts/{motif_name}_design_{attempt}_{ids}.pdb")
         # shortcut for only running salad
         if opt.salad_only == "True":
@@ -347,15 +365,19 @@ for motif, assembly in motif_paths:
             is_success = mean_plddt > opt.f_plddt and mean_pae < opt.f_pae and rmsd_ca < opt.f_sc_rmsd and motif_rmsd_bb < opt.f_motif_rmsd
             design_info["success"] = int(is_success)
             all_designs.write_line(design_info)
+            af2_data: DesignData = af2_result.to_data()
+            if opt.align_final_to_motif == "True":
+                af2_data = af2_data.align_to(
+                    data["motif"], mask=data["mask"],
+                    weight=data["has_motif"].astype(jnp.float32))
             if not is_success:
                 if opt.write_failed == "True":
-                    af2_result.save_pdb(f"{opt.out_path}/fail/{motif_name}_{attempt}_{idx}.pdb")
+                    af2_data.save_pdb(f"{opt.out_path}/fail/{motif_name}_{attempt}_{idx}.pdb")
                 continue
 
-            # all_designs.write_line(design_info)
             design_info.update(success=1, failure_reason="none")
             success.write_line(design_info)
-            af2_result.save_pdb(f"{opt.out_path}/success/{motif_name}_{attempt}_{idx}.pdb")
+            af2_data.save_pdb(f"{opt.out_path}/success/{motif_name}_{attempt}_{idx}.pdb")
             success_count += 1
             attempt_success_count += 1
         attempt += 1
