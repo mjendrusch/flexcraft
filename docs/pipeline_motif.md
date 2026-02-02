@@ -86,6 +86,14 @@ structure created after running `download_params.sh`.
             all of chain B. This is useful if a motif should be scaffolded
             in such a way, that the scaffold is compatible with interacting
             with chain B.
+- `--assembly_budget`:
+    optional specification of a total amino acid budget for motif scaffolding.
+    Budget is specified per chain, e.g. "100:100:0" for 3 chains.
+    If the budget for a chain is 0, the chain will not be padded.
+    Otherwise, chains that are shorter than the budget will be
+    flanked by a random number of non-motif residues on both the N and C-termini,
+    such that the total number of residues in the chain equals the specified
+    budget. Default: "none". 
 ### campaign size settings
 - `--num_designs`: number of requested designs passing all filters. Default: 48.
     Consider generating more designs than required, then selecting the best
