@@ -8,7 +8,7 @@ from salad.aflib.model.geometry import Vec3Array
 from collections import defaultdict
 
 from flexcraft.pipelines.graft.common import (
-    setup_directories, get_assembly_lengths, sample_data,
+    setup_directories, get_assembly_lengths, sample_data, pad_to_budget,
     make_simple_assembly, make_ghosts, get_motif_paths, make_aa_condition)
 from flexcraft.pipelines.graft.options import MODEL_OPTIONS, SAMPLER_OPTIONS
 from flexcraft.utils import *
@@ -136,6 +136,7 @@ opt = parse_options(
     out_path="outputs/",
     motif_path="motifs/",
     assembly="20-50,A1-20@0,20-50",
+    assembly_budget="none",
     condition_dssp="False",
     h_bias=0.0,
     e_bias=0.0,
@@ -260,8 +261,13 @@ for motif, assembly in motif_paths:
         data, init_prev = sample_data(
             salad_config, settings["segments"], settings["assembly"],
             pos_init=True)
-        data = pad_dict(data, max_length)
-        init_prev = pad_dict(init_prev, max_length)
+        # pad to aa budget
+        if opt.assembly_budget != "none":
+            budget = [int(c) for c in opt.assembly_budget.strip().split(":")]
+            data, init_prev = pad_to_budget(data, init_prev, budget)
+        else:
+            data = pad_dict(data, max_length)
+            init_prev = pad_dict(init_prev, max_length)
         # bias secondary structure
         data["dssp_mean"] = jnp.array([
             opt.l_bias, opt.h_bias, opt.e_bias], dtype=jnp.float32)
@@ -356,7 +362,7 @@ for motif, assembly in motif_paths:
                 af2_result.to_data(), data["motif"],
                 index=data["motif_group"], mask=data["has_motif"])
             design_info.update(
-                sequence=aas.decode(pmpnn_result["aa"], aas.AF2_CODE),
+                sequence=pmpnn_result.to_sequence_string(aas.AF2_CODE),#aas.decode(pmpnn_result["aa"], aas.AF2_CODE),
                 plddt=mean_plddt,
                 pae=mean_pae,
                 sc_rmsd=rmsd_ca,

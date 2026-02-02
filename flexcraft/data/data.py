@@ -13,6 +13,8 @@ from salad.modules.utils.dssp import assign_dssp
 from salad.modules.utils.geometry import index_align
 from salad.aflib.model.all_atom_multimer import atom14_to_atom37, get_atom37_mask
 
+import flexcraft.sequence.aa_codes as aas
+
 import tree
 import jax
 import jax.numpy as jnp
@@ -386,6 +388,15 @@ class DesignData:
             residue_index=data["residue_index"],
             chain_index=data["chain_index"],
             b_factors=b_factors)
+
+    def to_sequence_string(self, code=aas.AF2_CODE):
+        """Return the single-letter amino acid sequence with ":"-separated chains."""
+        chains = np.unique(self.chain_index)
+        result = []
+        for c in chains:
+            selector = self.chain_index == c
+            result.append(aas.decode(self.aa[selector], code=code))
+        return ":".join(result)
 
     def to_pdb_string(self) -> str:
         """Return a PDB string corresponding to this DesignData object.

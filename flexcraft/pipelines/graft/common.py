@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 
 import salad.inference as si
+from salad.data.allpdb import concatenate_dict
 from salad.modules.utils.dssp import assign_dssp
 from salad.inference.symmetry import Screw
 from salad.modules.utils.geometry import index_mean, index_align
@@ -248,6 +249,82 @@ def extract_motif(pdbs, pdb_names: list, segment_defn):
         use_center = use_center,
         bundle=np.full((length,), segment_defn["bundle"], dtype=np.int32)
     )
+
+def pad_to_budget(data, prev, assembly_budget):
+    chain = data["chain_index"]
+    chains = np.unique(chain)
+    result = []
+    prev_result = []
+    for c in chains:
+        chain_selector = chain == c
+        chain_length = (chain_selector.astype(np.int32)).sum()
+        chain_data = slice_dict(data, chain_selector)
+        chain_prev = slice_dict(prev, chain_selector)
+        budget = assembly_budget[c]
+        remaining = budget - chain_length
+        if chain_length < budget:
+            left_size = np.random.randint(0, remaining)
+            right_size = remaining - left_size
+            chain_data["residue_index"] += left_size
+            left = designable_segment(left_size, residue_index_start=1, chain_index=c,
+                                      pos_shape=chain_data["pos"].shape[1],
+                                      bundle=chain_data["bundle"][0],
+                                      center=chain_data["center"][0],
+                                      center_time=chain_data["center_time"][0],
+                                      center_group=chain_data["center_group"][0],
+                                      use_center=chain_data["use_center"][0])
+            right = designable_segment(right_size, residue_index_start=left_size + chain_length + 1, chain_index=c,
+                                       pos_shape=chain_data["pos"].shape[1],
+                                       bundle=chain_data["bundle"][-1],
+                                       center=chain_data["center"][-1],
+                                       center_time=chain_data["center_time"][-1],
+                                       center_group=chain_data["center_group"][-1],
+                                       use_center=chain_data["use_center"][-1])
+            left_prev = dict(pos=jnp.zeros([left_size] + list(prev["pos"].shape[1:]), dtype=jnp.float32),
+                             local=jnp.zeros((left_size,  prev["local"].shape[1],), dtype=jnp.float32))
+            right_prev = dict(pos=jnp.zeros([right_size] + list(prev["pos"].shape[1:]), dtype=jnp.float32),
+                              local=jnp.zeros((right_size,  prev["local"].shape[1],), dtype=jnp.float32))
+            result += [left, chain_data, right]
+            prev_result += [left_prev, chain_prev, right_prev]
+        else:
+            result += [chain_data]
+            prev_result += [chain_prev]
+    return concatenate_dict(result), concatenate_dict(prev_result)
+
+def designable_segment(length, pos_shape=5, residue_index_start=1, chain_index=0,
+                       bundle=None, chain_center=None,
+                       center=None, center_group=None,
+                       center_time=None, use_center=False):
+    if chain_center is None:
+        chain_center = np.zeros((3,), dtype=np.float32)
+    pos = np.zeros((length, pos_shape, 3), dtype=np.float32)
+    pos += chain_center
+    segment = dict(
+        pdb_index = np.full((length,), -1, dtype=np.int32),
+        motif_chain_index = np.full((length,), -1, dtype=np.int32),
+        has_motif = np.zeros((length,), dtype=np.bool_),
+        motif = np.zeros((length, 14, 3), dtype=np.float32),
+        motif_mask = np.zeros((length, 14), dtype=np.bool_),
+        motif_aa = np.full((length,), 20, dtype=np.int32),
+        motif_group = np.full((length,), -1, dtype=np.int32),
+        motif_dssp = np.full((length,), 3, dtype=np.int32),
+        bundle = np.full((length,), bundle, dtype=np.int32),
+        residue_index = residue_index_start + np.arange(length, dtype=np.int32),
+        chain_index = np.full((length,), chain_index, dtype=np.int32),
+        batch_index = np.zeros((length,), dtype=np.int32),
+        pos = pos,
+        seq = np.full((length,), 20, dtype=np.int32),
+        aa_gt = np.full((length,), 20, dtype=np.int32),
+        t_pos = np.ones((length,), dtype=np.float32),
+        t_seq = np.ones((length,), dtype=np.float32),
+        mask = np.ones((length,), dtype=np.bool_),
+        cyclic_mask = np.zeros((length,), dtype=np.bool_),
+        use_motif = np.full((length,), True, dtype=np.bool_))
+    segment["center"] = np.zeros((length, 3), dtype=np.float32) + center
+    segment["center_group"] = np.full((length,), center_group, dtype=np.float32)
+    segment["center_time"] = np.full((length,), center_time, dtype=np.float32)
+    segment["use_center"] = np.full((length,), use_center, dtype=np.bool_)
+    return segment
 
 def sample_data(salad_config, segments, assembly,
                 use_motif=True, pos_init=False,
