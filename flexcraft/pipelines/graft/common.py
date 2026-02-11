@@ -148,6 +148,11 @@ def model_step(config, task):
                 jnp.where(has_motif[:, None, None],
                           motif_aligned[:, :4],
                           out["pos"][:, :4]))
+            # FIXME: better alignment?
+            data["pos"] = data["pos"].at[:, 4:].set(
+                jnp.where(has_motif[:, None, None],
+                        motif_aligned[:, 1, None],
+                        data["pos"][:, 4:]))
         return out, prev
     return step.apply
 
