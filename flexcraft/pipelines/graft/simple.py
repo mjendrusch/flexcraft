@@ -275,8 +275,8 @@ for motif, assembly in motif_paths:
         aa_condition = data["motif_aa"]
         if opt.condition_dssp == "True":
             # NOTE: this is currently experimental
-            cond_data = slice_dict(data, data["chain_index"] == 0)
-            cond_prev = slice_dict(init_prev, data["chain_index"] == 0)
+            cond_data = slice_dict(data, data["chain_index"] == 0, skip_keys=["dssp_mean"])
+            cond_prev = slice_dict(init_prev, data["chain_index"] == 0, skip_keys=["dssp_mean"])
             design = condition_sampler(salad_params, key(), cond_data, cond_prev)
             design = data_from_protein(si.data.to_protein(design))
             dssp = design.dssp
@@ -314,6 +314,16 @@ for motif, assembly in motif_paths:
         if opt.redesign_motif_aa == "True":
             motif_aa = jnp.full_like(motif_aa, 20)
 
+        # drop chains for design
+        if opt.af_drop_chains != "none":
+            drop_chains = np.array(["ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(c.upper())
+                                    for c in opt.af_drop_chains.strip().split(",")], dtype=np.int32)
+            selector = ~(data["chain_index"][:, None] == drop_chains).any(axis=1)
+            data = slice_dict(data, selector, skip_keys=["dssp_mean"])
+            design = design[selector]
+            motif_aa = motif_aa[selector]
+            has_motif = has_motif[selector]
+
         init_info = dict(motif=motif_name, attempt=attempt)
         logit_center = pmpnn(key(), design.update(aa=motif_aa))["logits"].mean(axis=0)
         num_sequences = opt.num_sequences
@@ -335,11 +345,6 @@ for motif, assembly in motif_paths:
             pmpnn_result = pmpnn_input.update(
                 aa=aas.translate(pmpnn_result["aa"], aas.PMPNN_CODE, aas.AF2_CODE))
             # run AF2 filter
-            if opt.af_drop_chains != "none":
-                drop_chains = np.array([int(c) for c in opt.af_drop_chains.strip().split(",")], dtype=np.int32)
-                selector = ~(data["chain_index"][:, None] == drop_chains).any()
-                data = slice_dict(data, selector)
-                pmpnn_result = pmpnn_result[selector]
             af_input = AFInput.from_data(pmpnn_result).add_guess(pmpnn_result)
             if opt.template_motif == "True":
                 af_input = af_input.add_template(
