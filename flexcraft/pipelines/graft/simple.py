@@ -229,7 +229,8 @@ cycler = af_cycler(jax.jit(make_predict(make_af2(af2_config), num_recycle=0)),
 # set up output files
 score_keys = (
     "attempt", "seq_id", "T", "center",
-    "sequence", "sc_rmsd", "motif_rmsd", "plddt", "pae",
+    "sequence", "sc_rmsd", "motif_rmsd",
+    "plddt", "motif_plddt", "pae",
     "success"
 )
 
@@ -362,6 +363,7 @@ for motif, assembly in motif_paths:
             else:
                 mean_plddt = plddt.mean()
                 mean_pae = pae.mean()
+            motif_plddt = plddt[has_motif].mean()
             rmsd_ca = RMSD(["CA"])(af2_result.to_data(), design, mask=data["mask"])
             motif_rmsd_bb = RMSD(["N", "CA", "C", "O"])(
                 af2_result.to_data(), data["motif"],
@@ -369,6 +371,7 @@ for motif, assembly in motif_paths:
             design_info.update(
                 sequence=pmpnn_result.to_sequence_string(aas.AF2_CODE),#aas.decode(pmpnn_result["aa"], aas.AF2_CODE),
                 plddt=mean_plddt,
+                motif_plddt=motif_plddt,
                 pae=mean_pae,
                 sc_rmsd=rmsd_ca,
                 motif_rmsd=motif_rmsd_bb
