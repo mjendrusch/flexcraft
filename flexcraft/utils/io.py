@@ -22,7 +22,8 @@ def data_from_protein(protein: Protein):
         batch_index=np.zeros_like(protein.chain_index),
         tie_index=np.arange(protein.aatype.shape[0], dtype=np.int32),
         tie_weights=np.ones((protein.aatype.shape[0],), dtype=np.float32),
-        mask=atom_mask.any(axis=1)
+        mask=atom_mask.any(axis=1),
+        plddt=protein.b_factors[:, 1],
     ))
 
 def data_from_salad(data: dict) -> DesignData:
