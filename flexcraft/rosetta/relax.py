@@ -26,7 +26,8 @@ from flexcraft.files.pdb import PDBFile
 from flexcraft.data.data import DesignData
 
 def fastrelax(pdb_file: str | PDBFile | DesignData,
-              relaxed_pdb_path: str | None=None, tmpdir=None):
+              relaxed_pdb_path: str | None=None, tmpdir=None,
+              return_pose=False):
     """Run FastRelax with default settings on a `pdb_file` and write the output to `relaxed_pdb_path`.
     
     Args:
@@ -92,4 +93,23 @@ def fastrelax(pdb_file: str | PDBFile | DesignData,
     # FIXME: this causes subsequent steps to fail, why?
     if uses_tmpfile:
         tmp_file.remove()
+    if return_pose:
+        return result, pose
     return result
+
+def pair_energies(pdb_file: str | PDBFile | DesignData,
+                  tmpdir=None):
+    uses_tmpfile = False
+    if isinstance(pdb_file, pr.rosetta.core.pose.Pose):
+        pose = pdb_file
+    if isinstance(pdb_file, PDBFile):
+        pdb_file = pdb_file.path
+        pose = pr.pose_from_pdb(pdb_file)
+    if isinstance(pdb_file, DesignData):
+        uses_tmpfile = True
+        tmp_file = PDBFile(pdb_file, prefix="tmp", tmpdir=tmpdir)
+        pdb_file = tmp_file.path
+        pose = pr.pose_from_pdb(pdb_file)
+    scorefxn = pr.get_fa_scorefxn()
+    scorefxn.score(pose)
+    return pose.energies().residue_pair_energies_array()
