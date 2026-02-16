@@ -19,6 +19,7 @@ from flexcraft.files.pdb import PDBFile
 from flexcraft.tools.boltz import BoltzYAML
 
 from flexcraft.rosetta.relax import fastrelax
+from flexcraft.files.csv import ScoreCSV
 import pyrosetta as pr
 from flexcraft.structure.metrics import RMSD, sc_lddt, lddt
 
@@ -69,7 +70,20 @@ opt = parse_options(
     num_samples=10,
     seed=42
 )
-os.makedirs(opt.out_path, exist_ok=True)
+os.makedirs(f"{opt.out_path}/attempts", exist_ok=True)
+os.makedirs(f"{opt.out_path}/success", exist_ok=True)
+os.makedirs(f"{opt.out_path}/relaxed", exist_ok=True)
+
+# set up output files
+score_keys = (
+    "attempt", "seq_id", "T", "center",
+    "sequence", "sc_rmsd", "relax_rmsd", "lddt", "plddt", "sc_lddt", "success"
+)
+
+success = ScoreCSV(
+    f"{opt.out_path}/success.csv", score_keys, default="none")
+all_designs = ScoreCSV(
+    f"{opt.out_path}/all.csv", score_keys, default="none")
 
 # initialize pyrosetta
 pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -corrections::beta_nov16 true -relax:default_repeats 1')
@@ -117,24 +131,28 @@ sampler = si.Sampler(salad_step, out_steps=400)
 print("Starting design...")
 for idx in range(opt.num_designs):
     # generate a structure in each step
+    design_info = dict(attempt=idx)
     start = time.time()
     salad_data["dssp_condition"], dssp_string = si.random_dssp(
         num_aa, p=0.0, return_string=True)
     print(dssp_string)
     design = sampler(salad_params, key(), salad_data, init_prev)
     print(f"Design {idx} in {time.time() - start:.2f} s")
+    design = data_from_protein(si.data.to_protein(design))
+    design.save_pdb(f"{opt.out_path}/attempts/design_{idx}.pdb")
     # convert it to ProteinMPNN input
-    pmpnn_data = data_from_protein(
-        si.data.to_protein(design)).drop_aa()
+    pmpnn_data = design.drop_aa()
     step_0_logits = pmpnn(key(), pmpnn_data)["logits"]
     center = step_0_logits.mean(axis=0)
     # ensure one TRP/W residue
     p_W = jax.nn.softmax(step_0_logits - center)[:, aas.PMPNN_CODE.index("W")]
     best_W = jnp.argmax(p_W, axis=0)
-    #pmpnn_sampler = sample(pmpnn, logit_transform=transform(center, opt.temperature))
     for ids in range(opt.num_samples):
         # anneal temperature
         T = 1 - ids / opt.num_samples
+        design_info["seq_id"] = ids
+        design_info["T"] = T
+        design_info["center"] = True
         # prepare input
         pmpnn_data = pmpnn_data.drop_aa()
         # ensure one TRP/W residue (at the most probable position)
@@ -145,7 +163,8 @@ for idx in range(opt.num_designs):
         # ProteinMPNN has a different amino acid order than AF2
         # translate the amino acid order
         pmpnn_data["aa"] = aas.translate(result["aa"], aas.PMPNN_CODE, aas.AF2_CODE)
-        sequence = aas.decode(pmpnn_data["aa"], aas.AF2_CODE)
+        sequence = pmpnn_data.to_sequence_string(code=aas.AF2_CODE)
+        design_info["sequence"] = sequence
         af_data = AFInput.from_data(pmpnn_data).add_guess(pmpnn_data).add_pos(pmpnn_data)
         result = af2(af2_params, key(), af_data)
         plddt = result.plddt.mean()
@@ -153,13 +172,21 @@ for idx in range(opt.num_designs):
         residue_sc_lddt = sc_lddt(result, pmpnn_data)
         sc_lddt_mean = residue_sc_lddt.mean()
         sc_rmsd = RMSD(atoms=["CA"])(result.to_data(), pmpnn_data)
+        design_info.update(dict(
+            sc_rmsd=sc_rmsd, sc_lddt=sc_lddt_mean, lddt=lddt_mean, plddt=plddt
+        ))
         print(idx, ids, sequence, plddt, lddt_mean, sc_lddt_mean, sc_rmsd)
-        # BoltzYAML(result.to_data(), path="tmp/boltz.yaml")
-        if sc_lddt_mean > 0.7:#plddt > 0.8 and sc_rmsd < 2.0:
+        if sc_lddt_mean > 0.7:
             pdb = PDBFile(
                 result.to_data().update(plddt=residue_sc_lddt),
-                path=f"{opt.out_path}/result_{idx}.pdb")
-            relaxed = fastrelax(pdb, f"{os.path.dirname(opt.out_path + '/')}_relaxed/result_{idx}.pdb")
+                path=f"{opt.out_path}/success/design_{idx}_{ids}.pdb")
+            relaxed = fastrelax(pdb, f"{opt.out_path}/relaxed/design_{idx}_{ids}.pdb")
             relax_rmsd = RMSD(atoms=["CA"])(pdb.to_data(), relaxed.to_data(), mask=None)
+            design_info["relax_rmsd"] = relax_rmsd
+            design_info["success"] = True
             print(f"relaxed RMSD {relax_rmsd:.2f} A")
+            success.write_line(design_info)
+            all_designs.write_line(design_info)
             break
+        else:
+            all_designs.write_line(design_info)
