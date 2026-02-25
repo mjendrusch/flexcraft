@@ -556,7 +556,8 @@ def load_params(params_path):
     return joblib.load(params_path)
 
 
-def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scale_bias=None):
+def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scale_bias=None,
+               split_params=False):
     config = {
         "num_letters": 21,
         "node_features": 128,
@@ -576,6 +577,8 @@ def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scal
 
     run_pmpnn = hk.transform(inner).apply
     params = load_params(params_path)["model_state_dict"]
+    if split_params:
+        return run_pmpnn, params
     return lambda k, d: run_pmpnn(params, k, d)
 
 

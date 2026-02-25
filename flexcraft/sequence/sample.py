@@ -150,9 +150,11 @@ def select_random_position(key, logits, data):
     next_pos = jnp.argmin(next_map)
     return next_pos
 
-def slice_dict(x, index):
+def slice_dict(x, index, skip_keys=None):
+    if skip_keys is None:
+        skip_keys = []
     return {
-        k: v[index]
+        k: v[index] if k not in skip_keys else v
         for k, v in x.items()
     }
 

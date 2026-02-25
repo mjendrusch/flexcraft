@@ -24,7 +24,7 @@ def translate(aatype, from_code, to_code):
 def translate_onehot(one_hot, from_code, to_code):
     code_mapping = np.array([to_code.index(c) for c in from_code] + [20], dtype=np.int32)
     one_hot_mapping = jax.nn.one_hot(code_mapping, num_classes=21) # (from, to)
-    return jnp.einsum("if,ft->it", one_hot, one_hot_mapping)
+    return jnp.einsum("...f,ft->...t", one_hot, one_hot_mapping)
 
 def encode(sequence: str, code: str) -> jnp.ndarray:
     """Encode a single-letter code amino acid sequence as an integer amino acid type array.
