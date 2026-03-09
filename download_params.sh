@@ -20,8 +20,8 @@ cd af
 mkdir params
 curl -fsSL https://storage.googleapis.com/alphafold/alphafold_params_2022-03-02.tar | tar x -C params
 cd ../..
-mkdir deps
-cd deps
+mkdir dependencies
+cd dependencies
 wget https://github.com/martinpacesa/BindCraft/raw/refs/heads/main/functions/DAlphaBall.gcc
 chmod +x DAlphaBall.gcc
 cd ..
