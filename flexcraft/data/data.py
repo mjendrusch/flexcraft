@@ -75,6 +75,15 @@ class DesignData:
             tie_weights=jnp.ones((length,), dtype=jnp.float32),
             mask=jnp.ones((length,), dtype=jnp.bool_)
         ))
+    
+    @classmethod
+    def from_sequence(cls, sequence):
+        result = []
+        for subseq in sequence.split(":"):
+            subchain = DesignData.from_length(len(subseq))
+            subchain = subchain.update(aa=aas.encode(subseq, aas.AF2_CODE))
+            result.append(subchain)
+        return DesignData.concatenate(result, sep_chains=True)
 
     @classmethod
     def from_dict(cls, data: dict) -> "DesignData":
@@ -360,8 +369,9 @@ class DesignData:
                  weight: Array | None = None) -> "DesignData":
         """Align to another ``DesignData`` object, or coordinate ``Array``."""
         if isinstance(other, DesignData):
-            other = other["atom_positions"]
-            mask = other["atom_mask"].any(axis=1)
+            other_data = other
+            other = other_data["atom_positions"]
+            mask = other_data["atom_mask"].any(axis=1)
         return self.update(
             atom_positions=jnp.where(
                 self["atom_mask"][..., None],
@@ -419,7 +429,7 @@ class DesignData:
             f.write(to_pdb(self.to_protein()))
 
 
-def concatenate_dict(items: List[dict], axis=0) -> dict:
+def concatenate_dict(items: List[dict], axis=0, drop_non_common=True) -> dict:
     """Concatenate multiple dictionaries of arrays by concatenating
     arrays for each key along an axis.
     
@@ -433,7 +443,11 @@ def concatenate_dict(items: List[dict], axis=0) -> dict:
     """
     return {k: jnp.concatenate([
         item[k] for item in items], axis=axis)
-        for k in items[0]}
+        for k in items[0]
+        if drop_non_common and _all_have(items, k)}
+
+def _all_have(items, key):
+    return all([key in i for i in items])
 
 def _sep_groups(indices):
     result = []
