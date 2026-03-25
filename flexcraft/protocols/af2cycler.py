@@ -5,7 +5,7 @@ from flexcraft.utils.rng import Keygen
 from flexcraft.structure.af import AFResult, AFInput
 import flexcraft.sequence.aa_codes as aas
 
-def af_cycler(af_model, mpnn_model, confidence=None, fix_template=False):
+def af_cycler(af_model, mpnn_model, confidence=None, fix_template=False, fix_all=False):
     """AlphaFold2 recycling protocol.
     
     Args:
@@ -30,6 +30,8 @@ def af_cycler(af_model, mpnn_model, confidence=None, fix_template=False):
         # should non-cycled parts be held fixed exactly, or be allowed to move?
         if fix_template:
             template_aa = jnp.where(cycle_mask, template_aa, data["aa"])
+        if fix_all:
+            template_aa = data["aa"]
         af_input:  AFInput  = (
             AFInput.from_data(data)
             .add_template(data.update(

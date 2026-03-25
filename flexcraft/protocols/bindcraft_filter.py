@@ -68,7 +68,7 @@ class BindCraftProperties:
                 if avg_key not in result:
                     result[avg_key] = 0
                 result[avg_key] += value / len(self.af2_params)
-        result["success"] = self.filter(result)
+        result["success"], result["reason"] = self.filter(result)
         return af_results[0], result
 
     def metrics_from_result(self,
@@ -147,26 +147,57 @@ class BindCraftProperties:
         return result
 
 def default_filter(result):
-    success = result["1_i_pAE"] < 0.35
-    success = success and (result["2_i_pAE"] < 0.35)
-    success = success and (result["1_pLDDT"] > 0.8)
-    success = success and (result["2_pLDDT"] > 0.8)
-    success = success and (result["1_pTM"] > 0.55)
-    success = success and (result["2_pTM"] > 0.55)
-    success = success and (result["1_i_pTM"] > 0.5)
-    success = success and (result["2_i_pTM"] > 0.5)
-    success = success and (result["1_Surface_Hydrophobicity"] < 0.35)
-    success = success and (result["2_Surface_Hydrophobicity"] < 0.35)
-    success = success and (result["1_ShapeComplementarity"] > 0.55)
-    success = success and (result["2_ShapeComplementarity"] > 0.55)
-    success = success and (result["Average_ShapeComplementarity"] > 0.6)
-    success = success and (result["1_dSASA"] > 1.0)
-    success = success and (result["2_dSASA"] > 1.0)
-    success = success and (result["1_n_InterfaceResidues"] >= 7)
-    success = success and (result["2_n_InterfaceResidues"] >= 7)
-    success = success and (result["1_n_InterfaceHbonds"] >= 3)
-    success = success and (result["2_n_InterfaceHbonds"] >= 3)
-    success = success and (result["1_n_InterfaceUnsatHbonds"] < 10)
-    success = success and (result["2_n_InterfaceUnsatHbonds"] < 10)
-    success = success and (result["Average_RMSD"] < 2.0)
-    return success
+    reason = []
+
+    pae_success = result["1_i_pAE"] < 0.35
+    pae_success = pae_success and (result["2_i_pAE"] < 0.35)
+    if not pae_success:
+        reason.append("ipAE")
+    success = pae_success
+    plddt_success = (result["1_pLDDT"] > 0.8)
+    plddt_success = plddt_success and (result["2_pLDDT"] > 0.8)
+    if not plddt_success:
+        reason.append("pLDDT")
+    success = success and plddt_success
+    ptm_success = (result["1_pTM"] > 0.55)
+    ptm_success = ptm_success and (result["2_pTM"] > 0.55)
+    ptm_success = ptm_success and (result["1_i_pTM"] > 0.5)
+    ptm_success = ptm_success and (result["2_i_pTM"] > 0.5)
+    if not ptm_success:
+        reason.append("pTM")
+    success = success and ptm_success
+    hydrophobicity_success =  (result["1_Surface_Hydrophobicity"] < 0.35)
+    hydrophobicity_success = hydrophobicity_success and (result["2_Surface_Hydrophobicity"] < 0.35)
+    if not hydrophobicity_success:
+        reason.append("hydrophobicity")
+    success = success and hydrophobicity_success
+    shape_success = (result["1_ShapeComplementarity"] > 0.55)
+    shape_success = shape_success and (result["2_ShapeComplementarity"] > 0.55)
+    shape_success = shape_success and (result["Average_ShapeComplementarity"] > 0.6)
+    if not shape_success:
+        reason.append("shape_complementarity")
+    success = success and shape_success
+    sasa_success = (result["1_dSASA"] > 1.0)
+    sasa_success = sasa_success and (result["2_dSASA"] > 1.0)
+    if not sasa_success:
+        reason.append("dSASA")
+    success = success and sasa_success
+    interface_success = (result["1_n_InterfaceResidues"] >= 7)
+    interface_success = interface_success and (result["2_n_InterfaceResidues"] >= 7)
+    interface_success = interface_success and (result["1_n_InterfaceHbonds"] >= 3)
+    interface_success = interface_success and (result["2_n_InterfaceHbonds"] >= 3)
+    interface_success = interface_success and (result["1_n_InterfaceUnsatHbonds"] < 10)
+    interface_success = interface_success and (result["2_n_InterfaceUnsatHbonds"] < 10)
+    if not interface_success:
+        reason.append("interface")
+    success = success and interface_success
+    if success:
+        rmsd_success = (result["Average_RMSD"] < 2.0)
+        if not rmsd_success:
+            reason.append("RMSD")
+        success = success and rmsd_success
+    if not reason:
+        reason = "none"
+    else:
+        reason = ";".join(reason)
+    return success, reason
