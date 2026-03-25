@@ -59,6 +59,24 @@ class AFInput:
             data=_af_input_from_sequence(sequence)
         )
 
+    @staticmethod
+    def from_chains(*chains) -> "AFInput":
+        chain_info = []
+        for chain in chains:
+            kind = chain["kind"]
+            if chain["kind"] != "protein":
+                raise NotImplementedError(
+                    f"AF2 can only handle protein chains, '{kind}' is not supported.")
+            if "sequence" in chain:
+                chain_info.append(DesignData.from_sequence(chain["sequence"]))
+            elif "length" in chain:
+                chain_info.append(DesignData.from_length(chain["length"]))
+            else:
+                raise NotImplementedError(
+                    f"Chain info needs either a sequence or a length.")
+        result = DesignData.concatenate(chain_info, sep_chains=True)
+        return AFInput.from_data(result)
+
     def add_guess(self,
                   data: DesignData | None = None,
                   pos: Array | None = None) -> "AFInput":
@@ -174,12 +192,14 @@ class AFInput:
 
     def update_sequence(self, sequence: Array) -> "AFInput":
         """Modify the underlying sequence of an AFInput to `sequence`."""
-        result = AFInput(
-            prev_init=self.prev_init, pos_init=self.pos_init,
-            data={k: v for k, v in self.data.items()})
+        # result = AFInput(
+        #     prev_init=self.prev_init, pos_init=self.pos_init,
+        #     data={k: v for k, v in self.data.items()})
         if len(sequence.shape) == 1:
             sequence = jax.nn.one_hot(sequence, 20, axis=-1)
-        _update_sequence(result["data"], sequence)
+        result = AFInput(
+            prev_init=self.prev_init, pos_init=self.pos_init,
+            data=_update_sequence(self.data, sequence))
         return result
 
     def to_data(self) -> Any:
@@ -216,7 +236,7 @@ def _extend_array(data: Array, axis=0):
 
 def _af_input_from_sequence(sequence):
     L = sequence.shape[0]
-    result = prep_input_features(L=L)
+    result = _prep_input_features(L=L)
     result = _update_sequence(result, sequence)
     residue_index = jnp.arange(L, dtype=jnp.int32)
     chain_index = jnp.zeros_like(residue_index)
@@ -231,6 +251,50 @@ def _af_input_from_sequence(sequence):
     result["use_dropout"] = False
     return result
 
+
+# FIXME: is this causing sharding issues? unlikely
+def _prep_input_features(L, N=1, T=1, eN=1):
+  '''
+  given [L]ength, [N]umber of sequences and number of [T]emplates
+  return dictionary of blank features
+  '''
+  inputs = {'aatype': jnp.zeros(L,int),
+            'target_feat': jnp.zeros((L,20)),
+            'msa_feat': jnp.zeros((N,L,49)),
+            # 23 = one_hot -> (20, UNK, GAP, MASK)
+            # 1  = has deletion
+            # 1  = deletion_value
+            # 23 = profile
+            # 1  = deletion_mean_value
+  
+            'seq_mask': jnp.ones(L),
+            'msa_mask': jnp.ones((N,L)),
+            'msa_row_mask': jnp.ones(N),
+            'atom14_atom_exists': jnp.zeros((L,14)),
+            'atom37_atom_exists': jnp.zeros((L,37)),
+            'residx_atom14_to_atom37': jnp.zeros((L,14),int),
+            'residx_atom37_to_atom14': jnp.zeros((L,37),int),            
+            'residue_index': jnp.arange(L),
+            'extra_deletion_value': jnp.zeros((eN,L)),
+            'extra_has_deletion': jnp.zeros((eN,L)),
+            'extra_msa': jnp.zeros((eN,L),int),
+            'extra_msa_mask': jnp.zeros((eN,L)),
+            'extra_msa_row_mask': jnp.zeros(eN),
+
+            # for template inputs
+            'template_aatype': jnp.zeros((T,L),int),
+            'template_all_atom_mask': jnp.zeros((T,L,37)),
+            'template_all_atom_positions': jnp.zeros((T,L,37,3)),
+            'template_mask': jnp.zeros(T),
+            'template_pseudo_beta': jnp.zeros((T,L,3)),
+            'template_pseudo_beta_mask': jnp.zeros((T,L)),
+
+            # for alphafold-multimer
+            'asym_id': jnp.zeros(L),
+            'sym_id': jnp.zeros(L),
+            'entity_id': jnp.zeros(L),
+            'all_atom_positions': jnp.zeros((N,37,3))}
+  return inputs
 
 def _af_input_from_data(data: DesignData):
     seq_one_hot = jax.nn.one_hot(data.aa, 20, axis=-1)
@@ -268,11 +332,21 @@ def _update_sequence(features, one_hot):
 
 def _chain_residue_index(residue_index, chain_index):
     consecutive_index = jnp.arange(residue_index.shape[0], dtype=jnp.int32)
-    chain_break_index = jnp.concatenate((
+    residue_index_offset = jnp.concatenate((
+        jnp.zeros((1,), dtype=jnp.int32),
+        residue_index[1:] - residue_index[:-1]), axis=0)
+    #residue_index_has_break = residue_index_breaks > 1
+    chain_index_breaks = jnp.concatenate((
         jnp.zeros((1,), dtype=jnp.int32),
         chain_index[1:] != chain_index[:-1]), axis=0)
-    offset = jnp.cumsum(chain_break_index, axis=0)
-    return consecutive_index + 50 * offset
+    residue_index_offset = jnp.where(chain_index_breaks > 0, chain_index_breaks * 50, residue_index_offset)
+    output_index = jnp.cumsum(residue_index_offset, axis=0)
+    return output_index
+    # chain_break_index = jnp.concatenate((
+    #     jnp.zeros((1,), dtype=jnp.int32),
+    #     chain_index[1:] != chain_index[:-1]), axis=0)
+    # offset = jnp.cumsum(chain_break_index, axis=0)
+    # return consecutive_index + 50 * offset
 
 @chex.dataclass(mappable_dataclass=False)
 class AFResult:
@@ -290,6 +364,24 @@ class AFResult:
             bin_centers = jnp.arange(logits.shape[-1]) / logits.shape[-1]
             bin_centers += 1 / logits.shape[-1] / 2
         return (bin_centers * jax.nn.softmax(logits)).sum(axis=-1)
+
+    @property
+    def residue_index(self):
+        return self.inputs["residue_index"]
+    
+    @property
+    def chain_index(self):
+        return self.inputs["asym_id"]
+
+    @property
+    def local(self):
+        """Local residue features."""
+        return self.result["representations"]["msa_first_row"]
+    
+    @property
+    def pair(self):
+        """Residue pair features."""
+        return self.result["representations"]["pair"]
 
     @property
     def atom14(self):
@@ -332,6 +424,34 @@ class AFResult:
         d0 = 1.24 ** 3 * jnp.sqrt(L - 15) - 1.8
         d0 = jnp.where(L < 27, 1, d0)
         return (1 / (1 + (pae / d0) ** 2))
+    
+    def bptm_matrix(self, L=None):
+        logits = self.result["predicted_aligned_error"]["logits"]
+        probabilities = jax.nn.softmax(logits, axis=-1)
+        bin_centers = jnp.arange(logits.shape[-1]) / logits.shape[-1]
+        bin_centers += 1 / logits.shape[-1] / 2
+        bin_centers *= 32
+        if L is None:
+            L = logits.shape[0]
+        d0 = 1.24 ** 3 * jnp.sqrt(L - 15) - 1.8
+        d0 = jnp.where(L < 27, 1, d0)
+        return (probabilities * (1 / (1 + (bin_centers / d0) ** 2))).sum(axis=-1)
+
+    def target_ptm(self, is_target, bptm=True):
+        target_size = is_target.astype(jnp.int32).sum()
+        if bptm:
+            matrix = self.bptm_matrix(target_size)
+        else:
+            matrix = self.ptm_matrix(target_size)
+        binder_target_mask = (~is_target[:, None]) * is_target[None, :]
+        matrix = jnp.where(binder_target_mask, matrix, 0.0)
+        ptm_mean = matrix.sum(axis=1) / jnp.maximum(1, binder_target_mask.sum(axis=1))
+        ptm_max = ptm_mean.max(axis=0)
+        return ptm_max
+
+    @property
+    def bptm(self):
+        return self.bptm_matrix().mean(axis=1).max(axis=0)
 
     # FIXME: returns a constant value. Value should change
     @property
@@ -342,6 +462,16 @@ class AFResult:
     def iptm(self):
         """Interface predicted TM score."""
         ptm = self.ptm_matrix()
+        chain = self.inputs["asym_id"]
+        other_chain = chain[:, None] != chain[None, :]
+        result = (other_chain * ptm).sum(axis=1) / jnp.maximum(other_chain.sum(axis=1), 1)
+        result = result.max(axis=0)
+        return result
+    
+    @property
+    def ibptm(self):
+        """Interface predicted TM score."""
+        ptm = self.bptm_matrix()
         chain = self.inputs["asym_id"]
         other_chain = chain[:, None] != chain[None, :]
         result = (other_chain * ptm).sum(axis=1) / jnp.maximum(other_chain.sum(axis=1), 1)
@@ -407,6 +537,38 @@ class AFResult:
         distogram_clipped = jax.nn.softmax(distogram - 1e9 * (1 - edge_mask), axis=-1)
         distogram_clipped = jnp.where(edge_mask, distogram_clipped, 0)
         return -(distogram_clipped * distogram).sum(axis=-1)
+
+    def contact_score(self, contact_distance=14.0, min_resi_distance=10, num_contacts=25):
+        entropy = self.contact_entropy(contact_distance=contact_distance)
+        resi_dist = abs(self.residue_index[:, None] - self.residue_index[None, :])
+        other_chain = self.chain_index[:, None] != self.chain_index[None, :]
+        entropy = jnp.where((resi_dist >= min_resi_distance) + other_chain > 0, entropy, 1e6)
+        contact_score = entropy.sort(axis=1)[:, :num_contacts].mean(axis=-1).mean()
+        return contact_score
+
+    def chain_contact_score(self, target_chain, source_chain=0, contact_distance=14.0,
+                            min_resi_distance=10, num_contacts=25):
+        entropy = self.contact_entropy(contact_distance=contact_distance)
+        resi_dist = abs(self.residue_index[:, None] - self.residue_index[None, :])
+        other_chain = self.chain_index[:, None] != self.chain_index[None, :]
+        entropy = jnp.where((resi_dist >= min_resi_distance) + other_chain > 0, entropy, 1e6)
+        selector = self.chain_index == target_chain
+        entropy = jnp.where(selector[None, :], entropy, 1e6)
+        binder_selector = ~selector
+        if source_chain is not None:
+            if target_chain == source_chain:
+                binder_selector = selector
+            else:
+                binder_selector = binder_selector * (self.chain_index == source_chain)
+        contact_score = (entropy.sort(axis=1)[:, :num_contacts].mean(axis=-1) * binder_selector).sum()
+        contact_score /= jnp.maximum(1, binder_selector.sum())
+        return contact_score
+
+    def intra_contact_score(self, chain, contact_distance=14.0,
+                           min_resi_distance=10, num_contacts=25):
+        return self.chain_contact_score(
+            chain, chain, contact_distance=contact_distance,
+            min_resi_distance=min_resi_distance, num_contacts=num_contacts)
 
     def save_pdb(self, path):
         """Save an AFResult in PDB format at `path`."""

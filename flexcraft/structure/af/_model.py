@@ -2,6 +2,8 @@
 
 from copy import copy
 import chex
+import haiku as hk
+from typing import Optional, Mapping
 
 import numpy as np
 
@@ -9,7 +11,10 @@ import tree
 import jax
 import jax.numpy as jnp
 
-from colabdesign.af.alphafold.model import model
+import ml_collections
+import colabdesign.af.alphafold.model.modules as modules
+import colabdesign.af.alphafold.model.modules_multimer as modules_multimer
+# from colabdesign.af.alphafold.model import model
 from colabdesign.af.alphafold.model.geometry import Vec3Array
 from colabdesign.af.alphafold.model.all_atom_multimer import atom14_to_atom37, atom37_to_atom14
 from colabdesign.af.prep import prep_input_features
@@ -22,11 +27,83 @@ from flexcraft.data.data import DesignData
 from flexcraft.structure.af._data import AFInput, AFResult
 
 
+class RunModel:
+  """Container for JAX model."""
+
+  def __init__(self,
+               config: ml_collections.ConfigDict,
+               params: Optional[Mapping[str, Mapping[str, jnp.ndarray]]] = None,
+               return_representations=True,
+               recycle_mode=None,
+               use_multimer=False):
+
+    self.config = config
+    self.params = params
+    
+    self.mode = recycle_mode
+    if self.mode is None: self.mode = []
+
+    def _forward_fn(batch):
+      if use_multimer:
+        model = modules_multimer.AlphaFold(self.config.model)
+      else:
+        model = modules.AlphaFold(self.config.model)
+      return model(
+          batch,
+          return_representations=return_representations)
+    
+    self.init = jax.jit(hk.transform(_forward_fn).init)
+    self.apply_fn = hk.transform(_forward_fn).apply
+    
+    def apply(params, key, feat):
+      
+      if "prev" in feat:
+        prev = feat["prev"]      
+      else:
+        L = feat['aatype'].shape[0]
+        prev = {'prev_msa_first_row': jnp.zeros([L,256]),
+                'prev_pair': jnp.zeros([L,L,128]),
+                'prev_pos': jnp.zeros([L,37,3])}
+        if self.config.global_config.use_dgram:
+          prev['prev_dgram'] = jnp.zeros([L,L,64])
+        feat["prev"] = prev
+
+      ################################
+      # decide how to run recycles
+      ################################
+      if self.config.model.num_recycle:
+        # use scan()
+        def loop(prev, sub_key):
+          feat["prev"] = prev
+          results = self.apply_fn(params, sub_key, feat)
+          prev = results["prev"]
+          if "backprop" not in self.mode:
+              prev = jax.lax.stop_gradient(prev)
+          return prev, results
+
+        keys = jax.random.split(key, self.config.model.num_recycle + 1)
+        _, o = jax.lax.scan(loop, prev, keys)
+        results = jax.tree_map(lambda x:x[-1], o)
+
+        if "add_prev" in self.mode:
+          for k in ["distogram","predicted_lddt","predicted_aligned_error"]:
+            if k in results:
+              results[k]["logits"] = o[k]["logits"].mean(0)
+      
+      else:
+        # single pass
+        results = self.apply_fn(params, key, feat)
+      
+      return results
+    
+    self.apply = apply
+
 def make_af2(config, use_multimer=False):
     """Construct an AlphaFold model given a configuration."""
     def inner(params, key, data):
         config.model.num_recycle = None
-        return model.RunModel(
+        # FIXME: is this causing sharding issues? unlikely
+        return RunModel(
             config, None,
             recycle_mode=None,
             use_multimer=use_multimer).apply(params, key, data)
@@ -73,6 +150,7 @@ def make_predict(model, num_recycle=4):
     """Wrap AlphaFold 2 to use DesignData or AFInput inputs and return AFResult."""
     def inner(params, key, data):
         def body(prev, subkey):
+            data["prev"] = prev # FIXME
             results = model(params, subkey, data)
             prev = results["prev"]
             return prev, results
@@ -81,12 +159,15 @@ def make_predict(model, num_recycle=4):
         if isinstance(data, AFInput):
             data = data.data
         prev = data["prev"]
-        if num_recycle - 1 > 0:
-            prev, _ = jax.lax.scan(
-                jax.remat(body), prev,
-                jax.random.split(key, num_recycle - 1))
+        if num_recycle > 0:
+            prev, results = jax.lax.scan(
+                body, prev, # FIXME
+                jax.random.split(key, num_recycle))
+            result = jax.tree.map(lambda x: x[-1], results)
+        else:
+           prev, result = body(prev, key)
         data["prev"] = prev
-        result = model(params, key, data)
+        # result = model(params, key, data)
         result = AFResult(inputs=data, result=result)
         return result
     return inner
