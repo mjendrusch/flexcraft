@@ -267,8 +267,11 @@ af2_config.model.global_config.use_dgram = False
 af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
 cycler = af_cycler(jax.jit(make_predict(make_af2(af2_config), num_recycle=0)),
                    pmpnn, confidence=None, fix_template=opt.fix_template == "True")
+# define bindcraft filter properties
 filter = BindCraftProperties(
-    opt.out_path, key, opt.af2_params,
+    path=opt.out_path,
+    key=key,
+    af_parameter_path=opt.af2_params,
     filter=opt.bindcraft_success_filter,
     ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
 

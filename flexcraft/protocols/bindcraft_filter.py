@@ -14,9 +14,19 @@ from salad.modules.utils.geometry import index_align
 from flexcraft.structure.metrics import RMSD
 
 class BindCraftProperties:
-    def __init__(self, path, key, af_parameter_path, filter=None, 
-                 use_guess=False, relaxed_name="relaxed", ipae_shortcut_threshold=0.35):
-        
+    def __init__(self, path:str, key, af_parameter_path:str, filter:None|function=None, 
+                 use_guess:bool=False, relaxed_name:str="relaxed", ipae_shortcut_threshold:float=0.35):
+        '''
+        Args.:
+            path: str, output path (for relaxed PDB-file)
+            key: AF2 key
+            af_parameter_path: str, path to AF2 parameters
+            filter: str|callable, filter function to determine success from scores
+            use_guess: bool, wether to add an initial guess from the design to the AF2-input
+            relaxed_name: str, dir-name for the relaxed PDB-file
+            ipae_shortcut_threshold: float threshold to stop scoring early and skip interface scoring.
+                Independent from filter!
+        '''
         AVAILABLE_FILTERS = {"default": default_filter}
 
         if filter is None:
@@ -57,18 +67,22 @@ class BindCraftProperties:
             af_input = af_input.add_guess(design)
         result = dict()
         af_results = []
-        for model, params in enumerate(self.af2_params, 1):
+        # for each AF model, predict, get prediction score and get prediction interface score
+        for model_idx, params in enumerate(self.af2_params, 1):
             af_result: AFResult = self.af2(params, self.key(), af_input)
             af_results.append(af_result)
-            metrics = self.metrics_from_result(name + f"_model_{model}", af_result, design, is_target)
+            metrics = self.metrics_from_result(name + f"_model_{model_idx}", af_result, design, is_target)
             for key, value in metrics.items():
                 if "AAs" in key:
                     continue
-                result[f"{model}_{key}"] = value
+                # add to result
+                result[f"{model_idx}_{key}"] = value
+                # update averages in results
                 avg_key = f"Average_{key}"
                 if avg_key not in result:
                     result[avg_key] = 0
                 result[avg_key] += value / len(self.af2_params)
+        # apply final thresholds to determine success
         result["success"], result["reason"] = self.filter(result)
         return af_results[0], result
 
@@ -77,6 +91,10 @@ class BindCraftProperties:
                            af_result: AFResult,
                            design: DesignData,
                            is_target: jnp.ndarray,) -> dict:
+        '''
+        Performs filtering from AF predictions to results.
+        If i_pAE is under shortcut threshold, also filter by interface quality (rosetta).
+        '''
         result = dict()
         is_binder = ~is_target
         pair_is_binder = is_binder[:, None] * is_binder[None, :]
@@ -150,6 +168,7 @@ class BindCraftProperties:
         return result
 
 def default_filter(result):
+    '''Default filter to evaluate scoring results.'''
     reason = []
 
     pae_success = result["1_i_pAE"] < 0.35
