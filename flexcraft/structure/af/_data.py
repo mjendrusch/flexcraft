@@ -233,7 +233,7 @@ class AFInput:
         return result
 
     def to_data(self) -> Any:
-        raise DeprecationWarning("This function is not implemented, yet!")
+        raise NotImplementedError("This function is not implemented, yet!")
         return ... # TODO
 
 def _init_template(data):
@@ -382,8 +382,9 @@ def _chain_residue_index(residue_index, chain_index):
 @chex.dataclass(mappable_dataclass=False)
 class AFResult:
     """AlphaFold result dataclass."""
-    inputs: dict = None
-    result: dict = None
+    inputs: dict = None # AFInput data
+    result: dict = None # raw AF2 output
+
     def _mean_of_binned(self, name, has_edges=True) -> jnp.ndarray:
         logits = self.result[name]["logits"]
         if has_edges:
