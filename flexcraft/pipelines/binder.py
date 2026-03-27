@@ -34,6 +34,13 @@ import pyrosetta as pr
 
 # salad model step
 def model_step(config):
+    '''
+    Salad model step:
+    1. Structure editing/structural constraints
+    2. Noise
+    3. Salad denoising
+    4. Alignment
+    '''
     config = deepcopy(config)
     config.eval = True
     @hk.transform
@@ -41,48 +48,80 @@ def model_step(config):
         noise = si.StructureDiffusionNoise(config)
         predict = si.StructureDiffusionPredict(config)
         # extract relevant data for potentials
-        pos = data["pos"]
-        base_pos = pos
-        resi = data["residue_index"]
-        chain = data["chain_index"]
-        center = data["center"]
-        t = data["t_pos"][0]
+        pos = data["pos"]           # atom coordinates (L, 14, 3) contains target and binder
+        base_pos = pos              # save base positions for alignment
+        resi = data["residue_index"]# index, int (L,)
+        chain = data["chain_index"] # chain class, int (L,)
+        center = data["center"]     # center to place predicted protein
+        t = data["t_pos"][0]        # diffusion time step
+        # calculate centroid of binder
         binder_center = pos[config.target_size:, 1].mean(axis=0)
+        # take input center if high noise, else current center
         center = jnp.where(t > 2.0, center, binder_center)
-        pos = jnp.where((is_target)[:, None, None] > 0, pos, pos - binder_center[None, None, :] + center[None, None, :])
+        # move binder to center
+        if t>2.0:
+            pos = jnp.where((is_target)[:, None, None] > 0, pos, pos - binder_center[None, None, :] + center[None, None, :])
         # compute compact step to ensure monomer globularity
+        # take ca atoms
         ca = pos[:, 1]
+        # compute per chain centroid
         mean_pos = index_mean(ca, chain, jnp.ones_like(chain, dtype=jnp.bool_)[:, None])
+        # calculate vector to move to centroid 
         compact_step = config.compact_lr * (mean_pos[:, None] - pos)
         # move clashing residues further away from each other
         clash_step = config.clash_lr * si.contacts.clash_step(pos, resi, chain, threshold=8.0)
         # contact step
-        def contact_update(x, d0=4.0, r0=8.0):
+        def contact_update(x,       # Ca atom positions
+                           d0=4.0,  # ideal Ca distance
+                           r0=8.0,  # scale for penalty for d>d0
+                           ):
+            '''
+            Calculate gradient of contact loss (closeness of target to binder residues) 
+            with respect to ca position in space.
+
+            Args:
+                x: Position of ca atoms (L,3)
+                d0: int, ideal distance of ca atoms of binder to target
+                r0: cutoff for d_ij-d0
+            Returns:
+                Gradient of contact loss (L,1,3).
+            '''
+            # contact mask M_{ij}(L,L), True if i is target & j not is target
+            # restricts contact calculations to target<->binder interactions
             contact_mask = is_target[:, None] * (~is_target)[None, :]
             def contact_loss(ca):
+                '''Metric for closeness of target to binder ca atoms.'''
                 eps = 1e-6
+                # convert to ColabDesign class for 3d vector operations
                 ca = Vec3Array.from_array(ca)
+                # distance matrix (L,L) of ca atoms
                 rij = (ca[:, None] - ca[None, :]).norm()
+                # switching function to penalize rij!~d0
+                # symmetric around d0; s->0 for r>d0+r0 & r<d0-r0
+                # s(r)=1 for r~d0
                 sij = (1 - ((rij - d0) / r0) ** 6 + eps) / (1 - ((rij - d0) / r0) ** 12 + eps)
                 return (sij * contact_mask).mean()
             return jax.grad(contact_loss, argnums=(0,))(x)[0][:, None]
+        # scale contact gradient by lr
         contact_step = config.contact_lr * contact_update(ca)
-        # apply compact and clash steps scaled by noise standard deviation
+        # apply compact and clash steps scaled by noise standard deviation (timepoint)
+        # TODO: does this also compact the target?
         pos = pos + t * (compact_step + clash_step + contact_step)
         #pos = jnp.where((chain == chain.max())[:, None, None], pos + t * (compact_step + clash_step), pos)
         # center positions prior to noising
+        # center per batch
         pos = pos - index_mean(pos[:, 1], data["batch_index"], data["mask"][:, None])[:, None]
         data["pos"] = pos
-        # apply noise
+        # apply noise and predict denoised
         data.update(noise(data))
         out, prev = predict(data, prev)
         N = out["pos"].shape[0]
+        # zeros for all aa
         align_index = jnp.zeros((N,), dtype=jnp.int32)
-        # NOTE: do not code while sleep deprived.
+        # NOTE: do not code while sleep deprived. 
         # you will write bugs.
-        #
-        # align output to target, using only target
-        # amino acids for alignment.
+        # ;)
+        # realign target to base positions
         align_mask = data["mask"]
         align_weight = jnp.array(is_target, dtype=jnp.float32)
         out["pos"] = index_align(
@@ -90,6 +129,7 @@ def model_step(config):
             index=align_index,
             mask=align_mask,
             weight=align_weight)
+        # reset target positions, but only backbone
         out["pos"] = jnp.where(
             t > config.relax_cutoff,
             out["pos"].at[:config.target_size, :5].set(base_pos[:config.target_size, :5]), out["pos"])
@@ -313,6 +353,7 @@ while success_count < opt.num_designs:
     attempt = _attempt
     _attempt += 1
     attempt_success_count = 0
+    # set the center to place binder at
     pos_center = pos_centers[np.random.randint(0, pos_centers.shape[0])]
     init_data["center"] = pos_center
     init_data["pos"] = jnp.where(is_target[:, None, None], init_data["pos"], pos_center)
