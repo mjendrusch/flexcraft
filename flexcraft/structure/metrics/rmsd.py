@@ -97,7 +97,7 @@ class LRMSD(RMSD):
                  B_x,
                  A_y,
                  B_y,
-                 weight=None,
+                 mask=None,
                  index = None):
         # convert positions to jnp array
         A_x = _convert_input(A_x)
@@ -111,15 +111,15 @@ class LRMSD(RMSD):
         y = jnp.concat([A_y, B_y], axis=0)
         if len(A_x)>=len(B_x):
             print(f"A is assumed to be the receptor.")
-            A = np.ones(A_x.shape[:1], dtype=np.bool_)
-            B = np.zeros(B_x.shape[:1], dtype=np.bool_)
+            A = jnp.ones(A_x.shape[:1], dtype=np.bool_)
+            B = jnp.zeros(B_x.shape[:1], dtype=np.bool_)
         else:
             print(f"B is assumed to be the receptor.")
-            A = np.zeros(A_x.shape[:1], dtype=np.bool_)
-            B = np.ones(B_x.shape[:1], dtype=np.bool_)
-        receptor = np.concat([A, B], axis=0)
+            A = jnp.zeros(A_x.shape[:1], dtype=np.bool_)
+            B = jnp.ones(B_x.shape[:1], dtype=np.bool_)
+        receptor = jnp.concat([A, B], axis=0)
         # receptor excluded from RMSD
         eval_mask = ~receptor
         # ligand excluded from alignment
-        mask = receptor
+        weight = receptor
         return super().__call__(x, y, index, mask, eval_mask, weight)
