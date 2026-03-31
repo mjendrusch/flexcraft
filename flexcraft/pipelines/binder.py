@@ -104,7 +104,6 @@ def model_step(config):
         # scale contact gradient by lr
         contact_step = config.contact_lr * contact_update(ca)
         # apply compact and clash steps scaled by noise standard deviation (timepoint)
-        # TODO: does this also compact the target?
         pos = pos + t * (compact_step + clash_step + contact_step)
         #pos = jnp.where((chain == chain.max())[:, None, None], pos + t * (compact_step + clash_step), pos)
         # center positions prior to noising
