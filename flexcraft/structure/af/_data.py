@@ -94,7 +94,7 @@ class AFInput:
     def add_guess(self,
                   data: DesignData | None = None,
                   pos: Array | None = None) -> "AFInput":
-        """Add initial structure guess information as "prev" key to an AFInput using a
+        """Add initial guess information as "prev" key to an AFInput using a
         DesignData object `data` or coordinate array `pos`."""
         if data is not None:
             positions = data["atom_positions"]

@@ -59,8 +59,7 @@ def model_step(config):
         # take input center if high noise, else current center
         center = jnp.where(t > 2.0, center, binder_center)
         # move binder to center
-        if t>2.0:
-            pos = jnp.where((is_target)[:, None, None] > 0, pos, pos - binder_center[None, None, :] + center[None, None, :])
+        pos = jnp.where((is_target)[:, None, None] > 0, pos, pos - binder_center[None, None, :] + center[None, None, :])
         # compute compact step to ensure monomer globularity
         # take ca atoms
         ca = pos[:, 1]
