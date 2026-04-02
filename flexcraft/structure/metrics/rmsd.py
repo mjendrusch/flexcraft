@@ -91,35 +91,33 @@ class LRMSD(RMSD):
     """
     Ligand root mean square deviation (LRMSD) metric.
     Adapted from: Levine, S. et al., 2026. Origin-1: a generative AI platform for de novo antibody design against novel epitopes. https://doi.org/10.64898/2026.01.14.699389
+    By default, computes LRMSD for CA atoms.
     """
     def __call__(self,
-                 A_x,
-                 B_x,
-                 A_y,
-                 B_y,
+                 x,y,
+                 is_target:jnp.ndarray,
                  mask=None,
-                 index = None):
+                 index = None
+                 ):
+        '''
+        Calculate the lRMSD.
+        Args:
+            x, y: atom5+ format positions, or DesignData objects.
+            is_target: jnp.ndarray[bool] of same length as x and y, specifiying the target
+            index: optional partition of the input objects into groups 
+                which should be aligned separately.
+            mask: masked positions excluded from alignment and RMSD computation.
+                Included in RMSD if eval_mask!=None.
+            
+
+        '''
         # convert positions to jnp array
-        A_x = _convert_input(A_x)
-        A_y = _convert_input(A_y)
-        B_x = _convert_input(B_x)
-        B_y = _convert_input(B_y)
-        assert len(A_x) == len(A_y)
-        assert len(B_x) == len(B_y)
-        # Merge chains of A and B
-        x = jnp.concat([A_x, B_x], axis=0)
-        y = jnp.concat([A_y, B_y], axis=0)
-        if len(A_x)>=len(B_x):
-            print(f"A is assumed to be the receptor.")
-            A = jnp.ones(A_x.shape[:1], dtype=np.bool_)
-            B = jnp.zeros(B_x.shape[:1], dtype=np.bool_)
-        else:
-            print(f"B is assumed to be the receptor.")
-            A = jnp.zeros(A_x.shape[:1], dtype=np.bool_)
-            B = jnp.ones(B_x.shape[:1], dtype=np.bool_)
-        receptor = jnp.concat([A, B], axis=0)
+        x = _convert_input(x)
+        y = _convert_input(y)
+        assert len(x) == len(y), ValueError("Predicted sequence has different length from template!")
+        assert len(x) == len(is_target), ValueError("is_target and x have mismatching length!")
         # receptor excluded from RMSD
-        eval_mask = ~receptor
+        eval_mask = is_target
         # ligand excluded from alignment
-        weight = receptor
+        weight = ~is_target
         return super().__call__(x, y, index, mask, eval_mask, weight)

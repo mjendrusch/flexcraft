@@ -84,8 +84,8 @@ class AbsciBindIPTM:
 
         scorer = AbsciBindIPTM()
         ab_mask = result.chain_index == 0   # antibody chain(s)
-        ag_mask = result.chain_index == 1   # antigen chain(s)
-        scores = scorer(result, ab_mask, ag_mask)
+        is_target = result.chain_index == 1   # antigen chain(s)
+        scores = scorer(result, ab_mask, is_target)
         print(scores["iptm"])
 
     Reference: Levine et al. 2026, https://doi.org/10.64898/2026.01.14.699389
@@ -94,15 +94,13 @@ class AbsciBindIPTM:
     def __call__(
         self,
         result: AFResult,
-        ab_mask: np.ndarray,
-        ag_mask: np.ndarray,
+        is_target: np.ndarray,
     ) -> dict:
         """Compute the AbsciBind ipTM score.
 
         Args:
             result: AFResult object produced by an AlphaFold prediction.
-            ab_mask: Boolean mask selecting antibody (binder) residues, shape (L,).
-            ag_mask: Boolean mask selecting antigen (target) residues, shape (L,).
+            is_target: Boolean mask selecting antigen (target) residues, shape (L,).
 
         Returns:
             Dictionary with keys:
@@ -110,15 +108,15 @@ class AbsciBindIPTM:
                 ``default_iptm``    – max[ipTM_Ab(Ag;L_tot), ipTM_Ag(Ab;L_tot)].
                 ``ab_aligned_iptm`` – ipTM_Ab(Ag; L_Ag).
         """
-        ab_mask = jnp.asarray(ab_mask, dtype=jnp.bool_)
-        ag_mask = jnp.asarray(ag_mask, dtype=jnp.bool_)
+        is_target = jnp.asarray(is_target, dtype=jnp.bool_)
+        ab_mask = jnp.asarray(~is_target, dtype=jnp.bool_)
 
         # PAE bin probabilities: shape (L, L, 64)
         logits = result.result["predicted_aligned_error"]["logits"]
         probabilities = jax.nn.softmax(logits, axis=-1)
 
         L_ab = ab_mask.astype(jnp.int32).sum()
-        L_ag = ag_mask.astype(jnp.int32).sum()
+        L_ag = is_target.astype(jnp.int32).sum()
         L_tot = L_ab + L_ag
 
         # pTM matrices for both normalization lengths
@@ -126,12 +124,12 @@ class AbsciBindIPTM:
         ptm_ag  = _ptm_matrix(probabilities, L_ag)
 
         # Default ipTM: max[ipTM_Ab(Ag;L_tot), ipTM_Ag(Ab;L_tot)]
-        iptm_ab  = _iptm_A_given_B(ptm_tot, ab_mask, ag_mask)
-        iptm_ag  = _iptm_A_given_B(ptm_tot, ag_mask, ab_mask)
+        iptm_ab  = _iptm_A_given_B(ptm_tot, ab_mask, is_target)
+        iptm_ag  = _iptm_A_given_B(ptm_tot, is_target, ab_mask)
         default_iptm = jnp.maximum(iptm_ab, iptm_ag)
 
         # Antibody-Aligned ipTM: ipTM_Ab(Ag; L_Ag)
-        ab_aligned_iptm = _iptm_A_given_B(ptm_ag, ab_mask, ag_mask)
+        ab_aligned_iptm = _iptm_A_given_B(ptm_ag, ab_mask, is_target)
 
         # Final score: mean of both
         iptm = (default_iptm + ab_aligned_iptm) / 2

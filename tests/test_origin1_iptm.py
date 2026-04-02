@@ -4,109 +4,9 @@ Source: flexcraft/flexcraft/structure/metrics/Origin1_ipTM.py
 """
 
 # ---------------------------------------------------------------------------
-# Mock shim — must come before any flexcraft imports.
-#
-# Strategy: stub out the entire colabdesign / haiku import chain so that only
-# the pure JAX/numpy functions in Origin1_ipTM.py are exercised.  AFResult is
-# never actually used at runtime in the tested code — the class only accesses
-# result.result["predicted_aligned_error"]["logits"], so we provide a minimal
-# MockAFResult instead of the real class.
-# ---------------------------------------------------------------------------
-import sys
-import types
-
-# --- haiku stub (colabdesign needs hk.Module etc.) -------------------------
-_hk_mock = types.ModuleType("haiku")
-_hk_mock.__version__ = "mock"
-_hk_mock.Params = dict
-
-
-class _FakeModule:
-    """Minimal haiku.Module stand-in."""
-    pass
-
-
-_hk_mock.Module = _FakeModule
-_hk_mock.transform = lambda f: f          # no-op decorator
-_hk_mock.transform_with_state = lambda f: f
-sys.modules["haiku"] = _hk_mock
-for _sub in [
-    "haiku.experimental",
-    "haiku._src",
-    "haiku._src.layer_stack",
-    "haiku._src.lift",
-    "haiku._src.transform",
-]:
-    sys.modules[_sub] = types.ModuleType(_sub)
-
-# --- stub out the colabdesign import chain ---------------------------------
-for _mod_name in [
-    "colabdesign",
-    "colabdesign.af",
-    "colabdesign.af.model",
-    "colabdesign.af.alphafold",
-    "colabdesign.af.alphafold.model",
-    "colabdesign.af.alphafold.model.geometry",
-    "colabdesign.af.alphafold.model.modules",
-    "colabdesign.af.alphafold.model.all_atom_multimer",
-    "colabdesign.af.prep",
-    "colabdesign.af.inputs",
-]:
-    sys.modules.setdefault(_mod_name, types.ModuleType(_mod_name))
-
-# geometry stub needs Vec3Array
-sys.modules["colabdesign.af.alphafold.model.geometry"].Vec3Array = object
-
-# --- stub out salad ---------------------------------------------------------
-for _mod_name in ["salad", "salad.aflib", "salad.aflib.common", "salad.aflib.common.protein"]:
-    sys.modules.setdefault(_mod_name, types.ModuleType(_mod_name))
-
-# --- stub out the AFResult / AFInput that _data.py would provide -----------
-# We pre-register a fake flexcraft.structure.af._data so Origin1_ipTM's
-# `from flexcraft.structure.af._data import AFResult` resolves cleanly.
-_af_data_mock = types.ModuleType("flexcraft.structure.af._data")
-
-
-class AFResult:  # minimal stub — only used as a type annotation
-    pass
-
-
-_af_data_mock.AFResult = AFResult
-sys.modules["flexcraft.structure.af._data"] = _af_data_mock
-
-# Also stub the parent packages so Python doesn't try to exec their __init__
-for _mod_name in [
-    "flexcraft",
-    "flexcraft.structure",
-    "flexcraft.structure.af",
-    "flexcraft.structure.metrics",
-]:
-    sys.modules.setdefault(_mod_name, types.ModuleType(_mod_name))
-
-sys.path.insert(0, "/home/ntbiotech/Documents/Current_projects/BinderDesign/flexcraft")
-
-# ---------------------------------------------------------------------------
-# Load Origin1_ipTM directly by file path so the package import chain
-# (colabdesign → haiku → …) is never triggered.
-# ---------------------------------------------------------------------------
-import importlib.util as _ilu
-
-_spec = _ilu.spec_from_file_location(
-    "flexcraft.structure.metrics.Origin1_ipTM",
-    "/home/ntbiotech/Documents/Current_projects/BinderDesign/flexcraft/"
-    "flexcraft/structure/metrics/Origin1_ipTM.py",
-)
-_origin1_mod = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(_origin1_mod)
-
-_d0 = _origin1_mod._d0
-_ptm_matrix = _origin1_mod._ptm_matrix
-_iptm_A_given_B = _origin1_mod._iptm_A_given_B
-AbsciBindIPTM = _origin1_mod.AbsciBindIPTM
-
-# ---------------------------------------------------------------------------
 # Standard imports
 # ---------------------------------------------------------------------------
+from flexcraft.structure.metrics.Origin1_ipTM import _d0, _iptm_A_given_B, _ptm_matrix, AbsciBindIPTM
 import numpy as np
 import jax.numpy as jnp
 import pytest
@@ -333,9 +233,8 @@ class TestAbsciBindIPTM:
         L = 10
         scorer = self._make_scorer()
         result = MockAFResult(_uniform_logits(L))
-        ab_mask = np.array([True] * 5 + [False] * 5)
         ag_mask = np.array([False] * 5 + [True] * 5)
-        scores = scorer(result, ab_mask, ag_mask)
+        scores = scorer(result, ag_mask)
         assert set(scores.keys()) == {"iptm", "default_iptm", "ab_aligned_iptm"}
 
     def test_iptm_equals_mean_of_components(self):
@@ -345,9 +244,8 @@ class TestAbsciBindIPTM:
         rng = np.random.default_rng(7)
         logits = rng.standard_normal((L, L, 64)).astype(np.float32)
         result = MockAFResult(logits)
-        ab_mask = np.array([True] * 6 + [False] * 6)
         ag_mask = np.array([False] * 6 + [True] * 6)
-        scores = scorer(result, ab_mask, ag_mask)
+        scores = scorer(result, ag_mask)
         expected = (float(scores["default_iptm"]) + float(scores["ab_aligned_iptm"])) / 2
         assert float(scores["iptm"]) == pytest.approx(expected, rel=1e-5)
 
@@ -358,9 +256,8 @@ class TestAbsciBindIPTM:
         L = 10  # 5 Ab + 5 Ag
         scorer = self._make_scorer()
         result = MockAFResult(_uniform_logits(L))
-        ab_mask = np.array([True] * 5 + [False] * 5)
         ag_mask = np.array([False] * 5 + [True] * 5)
-        scores = scorer(result, ab_mask, ag_mask)
+        scores = scorer(result, ag_mask)
         # With symmetric uniform logits both directions give identical pTM values
         # so ipTM_Ab(Ag; L_tot) == ipTM_Ag(Ab; L_tot) → default_iptm == one of them
         # We verify default_iptm >= ab_aligned_iptm (formula check: L_tot vs L_ag)
@@ -377,11 +274,10 @@ class TestAbsciBindIPTM:
         scorer = self._make_scorer()
         L = 10
         result = MockAFResult(_uniform_logits(L))
-        ab_mask = np.array([True] * 5 + [False] * 5)
         ag_mask = np.array([False] * 5 + [True] * 5)
 
-        scores1 = scorer(result, ab_mask, ag_mask)
-        scores2 = scorer(result, ab_mask, ag_mask)
+        scores1 = scorer(result, ag_mask)
+        scores2 = scorer(result, ag_mask)
         # Determinism check: same inputs → same outputs
         assert float(scores1["iptm"]) == pytest.approx(float(scores2["iptm"]))
         assert float(scores1["default_iptm"]) == pytest.approx(float(scores2["default_iptm"]))
@@ -394,9 +290,8 @@ class TestAbsciBindIPTM:
         scorer = self._make_scorer()
         L = 20
         result = MockAFResult(_uniform_logits(L))
-        ab_mask = np.array([True] * 10 + [False] * 10)
         ag_mask = np.array([False] * 10 + [True] * 10)
-        scores = scorer(result, ab_mask, ag_mask)
+        scores = scorer(result, ag_mask)
         for key, val in scores.items():
             v = float(val)
             assert 0.0 <= v <= 1.0, f"{key}={v} is out of [0, 1]"
@@ -408,9 +303,8 @@ class TestAbsciBindIPTM:
         L = 16
         logits = rng.standard_normal((L, L, 64)).astype(np.float32)
         result = MockAFResult(logits)
-        ab_mask = np.array([True] * 8 + [False] * 8)
         ag_mask = np.array([False] * 8 + [True] * 8)
-        scores = scorer(result, ab_mask, ag_mask)
+        scores = scorer(result, ag_mask)
         for key, val in scores.items():
             v = float(val)
             assert 0.0 <= v <= 1.0, f"{key}={v} is out of [0, 1]"
@@ -421,9 +315,8 @@ class TestAbsciBindIPTM:
         L = 12
         # Spike on first bin → high pTM scores
         result = MockAFResult(_spike_logits(L, bin_idx=0))
-        ab_mask = np.array([True] * 6 + [False] * 6)
         ag_mask = np.array([False] * 6 + [True] * 6)
-        scores = scorer(result, ab_mask, ag_mask)
+        scores = scorer(result, ag_mask)
         for key, val in scores.items():
             v = float(val)
             assert 0.0 <= v <= 1.0, f"{key}={v} is out of [0, 1]"
@@ -431,18 +324,22 @@ class TestAbsciBindIPTM:
     # --- 7. Mask swap ---
 
     def test_swap_masks_changes_ab_aligned_iptm(self):
-        """Swapping ab/ag masks should change ab_aligned_iptm (uses asymmetric L_ag)."""
+        """Swapping ab/ag roles should change ab_aligned_iptm (uses asymmetric L_ag).
+
+        Call with ag_mask (10 residues as antigen) vs ab_mask (4 residues as antigen).
+        ab_aligned_iptm uses L_ag for d0: swapping changes L_ag from 10 to 4.
+        """
         scorer = self._make_scorer()
         rng = np.random.default_rng(13)
         L = 14  # unequal chains: 4 Ab, 10 Ag
         logits = rng.standard_normal((L, L, 64)).astype(np.float32)
         result = MockAFResult(logits)
 
-        ab_mask = np.array([True] * 4 + [False] * 10)
-        ag_mask = np.array([False] * 4 + [True] * 10)
+        ag_mask = np.array([False] * 4 + [True] * 10)   # original: 10 residues as antigen
+        ab_mask = np.array([True] * 4 + [False] * 10)   # swapped: 4 residues as antigen
 
-        scores_orig = scorer(result, ab_mask, ag_mask)
-        scores_swap = scorer(result, ag_mask, ab_mask)
+        scores_orig = scorer(result, ag_mask)
+        scores_swap = scorer(result, ab_mask)
 
         # ab_aligned_iptm uses L_ag for d0: swapping changes L_ag from 10 to 4
         assert float(scores_orig["ab_aligned_iptm"]) != pytest.approx(
@@ -450,7 +347,7 @@ class TestAbsciBindIPTM:
         ), "ab_aligned_iptm should differ when masks are swapped with unequal chain lengths"
 
     def test_swap_masks_default_iptm_same_symmetric_logits(self):
-        """With uniform logits, default_iptm should be equal after mask swap.
+        """With uniform logits, default_iptm should be equal after swapping which chain is target.
 
         default_iptm = max[ipTM_Ab(Ag;L_tot), ipTM_Ag(Ab;L_tot)].
         Swapping ab/ag swaps the two terms inside max — the result is the same.
@@ -459,29 +356,29 @@ class TestAbsciBindIPTM:
         scorer = self._make_scorer()
         L = 10
         result = MockAFResult(_uniform_logits(L))
-        ab_mask = np.array([True] * 5 + [False] * 5)
-        ag_mask = np.array([False] * 5 + [True] * 5)
+        ag_mask = np.array([False] * 5 + [True] * 5)   # last 5 as antigen
+        ab_mask = np.array([True] * 5 + [False] * 5)   # first 5 as antigen (swapped)
 
-        scores_orig = scorer(result, ab_mask, ag_mask)
-        scores_swap = scorer(result, ag_mask, ab_mask)
+        scores_orig = scorer(result, ag_mask)
+        scores_swap = scorer(result, ab_mask)
 
         assert float(scores_orig["default_iptm"]) == pytest.approx(
             float(scores_swap["default_iptm"]), rel=1e-5
         )
 
     def test_swap_masks_default_iptm_same_random_logits(self):
-        """default_iptm = max(a, b) == max(b, a) — identical after swap for any logits."""
+        """default_iptm = max(a, b) == max(b, a) — identical after swapping which chain is target."""
         scorer = self._make_scorer()
         rng = np.random.default_rng(55)
         L = 12
         logits = rng.standard_normal((L, L, 64)).astype(np.float32)
         result = MockAFResult(logits)
 
-        ab_mask = np.array([True] * 6 + [False] * 6)
-        ag_mask = np.array([False] * 6 + [True] * 6)
+        ag_mask = np.array([False] * 6 + [True] * 6)   # last 6 as antigen
+        ab_mask = np.array([True] * 6 + [False] * 6)   # first 6 as antigen (swapped)
 
-        scores_orig = scorer(result, ab_mask, ag_mask)
-        scores_swap = scorer(result, ag_mask, ab_mask)
+        scores_orig = scorer(result, ag_mask)
+        scores_swap = scorer(result, ab_mask)
 
         assert float(scores_orig["default_iptm"]) == pytest.approx(
             float(scores_swap["default_iptm"]), rel=1e-5
