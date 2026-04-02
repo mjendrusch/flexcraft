@@ -80,7 +80,13 @@ def load_data(out_dir:str|Path):
 
 load_data("flexcraft/data/o1_iptm_scoring")
 
-def insert_CDRs(cdrs:list|tuple, chain_ids:list|tuple, positions:list|tuple, lengths:list|tuple, scaffold:DesignData):
+def insert_CDRs(
+        cdrs:list[str]|tuple[str],
+        chain_id:int|str,
+        positions:list[int]|tuple[int],
+        lengths:list[int]|tuple[int],
+        scaffold:DesignData,
+        ):
     """
     Function to insert HCDR designs into antibody scaffolds.
     Args:
@@ -92,22 +98,52 @@ def insert_CDRs(cdrs:list|tuple, chain_ids:list|tuple, positions:list|tuple, len
     Returns:
         Inserted data: DesignData object with manipulated Antibody structure
         insert mask: bool mask, False at inserts
-
+    Note:
+        Converts chain index to numerical values
     """
-    
-    aa = scaffold["aa"]
-    mask = np.ones(len(aa), dtype=np.bool_)
-    chain_index = scaffold["chain_index"]
-    indexes = np.arange(len(aa))
-    for cdr, chain, position, length in zip(cdrs, chain_ids, positions, lengths):
-        # compute chain start
-        chain_start = indexes[chain_index==chain][0]
-        # remove old and insert new
-        aa = jnp.concat([aa[:chain_start+position],aas.encode(cdr, aas.AF2_CODE), aa[chain_start+position:length:]])
-        mask = jnp.concat([mask[:chain_start+position],np.zeros(len(cdr), dtype=np.bool_), mask[chain_start+position:length:]])
+    # check input
+    assert len(cdrs) == len(positions)
+    assert len(cdrs) == len(lengths)
 
-    scaffold.update(aa=aa)
-    return scaffold, mask
+
+    chain_index = scaffold["chain_index"]
+    mask = np.ones(len(chain_index), dtype=np.bool_)
+    # get the chain start
+    indexes = np.arange(len(chain_index))
+    chain_start = indexes[chain_index==chain_id][0]
+    positions = positions+chain_start
+    
+    # sort by positions
+    sorter = np.argsort(positions)
+    cdrs = np.array(cdrs)[sorter] # type: ignore
+    # add 0 to start the sequence for out
+    lengths = np.concat([[0],np.array(lengths)[sorter]]) # type: ignore
+    positions = np.concat([[0],np.array(positions)[sorter]]) # type: ignore
+    
+    # convert inserts to designdata
+    inserts = [DesignData.from_sequence(cdr) for cdr in cdrs]
+    
+    # convert scaffold to get numerical chain index
+    conv_scaffold = scaffold.update(chain_index = _convert_chains(scaffold["chain_index"])) # type: ignore
+
+    out = DesignData.concatenate([
+        *[
+        conv_scaffold[positions[n]+lengths[n]:positions[n+1]] + inserts[n]
+        for n in range(len(cdrs))
+        ],
+        conv_scaffold[positions[-1]+lengths[-1]:]],
+        sep_chains=False, sep_batch=False)
+    
+    mask = np.concat([
+        *[
+        np.concat([mask[positions[n]+lengths[n]:positions[n+1]], np.zeros_like(inserts[n]["chain_index"], dtype=np.bool_)])
+        for n in range(len(cdrs))
+        ],
+        mask[positions[-1]+lengths[-1]:]]
+        )
+
+    assert len(out["aa"]) == len(mask)
+    return out, mask
 
 def clean_chothia(file:Path|str,
     cdr_pos:dict = {"HCHAIN":(np.array([26,52,95]),np.array([9,4,7])),
@@ -205,13 +241,26 @@ def clean_chothia(file:Path|str,
                 wf.write(l)
     return out, chain_order
 
+def _convert_chains(chain_ids:np.ndarray):
+    '''
+    Convert str ids into numeric index if not int.
+    Otherwise returns chain_ids.
+    '''
+    if chain_ids.dtype != int:
+        unique_chain_ids = np.unique(chain_ids)
+        chain_id_mapping = {cid: n for n, cid in enumerate(unique_chain_ids)}
+        chain_index = np.array([chain_id_mapping[cid] for cid in chain_ids])
+        return chain_index
+    return chain_ids
+
+
 def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kwargs):
     """Run abscibind on structures used to benchmark in origin1."""
 
     if not isinstance(data_dir, Path):
         data_dir = Path(data_dir)
 
-    with open(data_dir/"annotations.json", "r") as rf:
+    with open(data_dir/"annotation.json", "r") as rf:
         annotations = json.load(rf)
 
     abscibind = AbsciBind(key=af2_key, af_parameter_path=af_parameter_path, **abscibind_kwargs)
@@ -221,7 +270,7 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kw
         af_input = (AFInput
                         .from_data(data)
                         .add_template(data,where=where))
-        if not "multimer" in abscibind.af2_params[0]:
+        if not "multimer" in abscibind.model[0]:
             num_chains = len(jnp.unique(data["chain_index"]))
             af_input = af_input.block_diagonal(num_sequences=num_chains)
                 
@@ -231,6 +280,9 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kw
     out_data = pd.DataFrame(columns=["scaffold", "ipTM", "HCDR1","HCDR2","HCDR3","KD (nM)","Binder"])
 
     for scaffold_name, scaffold_ann in annotations.items():
+        if not scaffold_ann["file name"]:
+            print(f"Skip {scaffold_name} as file name missing.")
+            continue
         csv_path = data_dir/scaffold_ann['file name']
         if not csv_path.exists():
             print(f"CSV file for {scaffold_name} is not in {data_dir}. Expected name from annotations.json: {scaffold_ann['file name']}!")
@@ -240,27 +292,21 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kw
         ab_chain_ids = (scaffold_ann["Light Chain ID"], scaffold_ann["Heavy Chain ID"])
         
         # load the protein structure
-        positions, chain_starts = clean_chothia(data_dir/f"{annotations['PDB ID']}_chothia.pdb")
-        pdb = PDBFile(path=data_dir/f"{annotations['PDB ID']}_chothia_clean.pdb")
+        positions, _ = clean_chothia(data_dir/f"{scaffold_ann['PDB ID'].lower()}_chothia.pdb")
+        pdb = PDBFile(path=data_dir/f"{scaffold_ann['PDB ID'].lower()}_chothia_clean.pdb", convert_chains=False)
         data = pdb.to_data()
-        # filter chains
-        chain_mask = data["chain"]==ag_chain_id|data["chain"]==ab_chain_ids[0]|data["chain"]==ab_chain_ids[1]
-        data = data[chain_mask]
+        if data["batch_index"].dtype != int:
+            data = data.update(batch_index = np.zeros_like(data["chain_index"], dtype=np.int16))
         positions = positions[ab_chain_ids[1]]
-        cdr_chain_ids = (1,1,1)
-        # make chain 0,1 or 2 for light, heavy and antigen
-        chain_index = np.zeros_like(data["chain"])
-        chain_index[data["chain"] == ab_chain_ids[1]] = 1
-        chain_index[data["chain"] == ag_chain_id] = 2
-        data = data.update(chain_index=chain_index)
         # iterate over desgins and insert hcdrs
         for d_tuple in df[["HCDR1", "HCDR2", "HCDR3","KD (nM)", "Binder"]].itertuples(index=False, name=None):
             # insert CDRs
-            data, mask = insert_CDRs(cdrs=d_tuple[:3], chain_ids=cdr_chain_ids, positions=positions[0], lengths=positions[1], scaffold=data)
+            data_conv, mask = insert_CDRs(cdrs=d_tuple[:3], chain_id=ab_chain_ids[1], positions=positions[0], lengths=positions[1], scaffold=data)
             # predict structure with insert
-            data = update_structure(data, where=mask)
+            
+            data_conv = update_structure(data_conv, where=mask)
             # calculate iptm
-            iptm = abscibind(design=data, is_target=(chain_index==2))
+            iptm = abscibind(design=data_conv, is_target=(data["chain_index"]==ag_chain_id))
     
             out_data.iloc[-1] = [scaffold_name, [i for i in iptm.values()][0], *d_tuple]
     out_data.to_csv(data_dir/"ipTM_data.csv")

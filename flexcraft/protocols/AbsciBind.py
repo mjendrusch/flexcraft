@@ -57,15 +57,15 @@ class AbsciBind:
                     .add_template(design,where=where))#TODO: do I need where=is_target))
         
         scores = {}
-        for params in self.af2_params:
+        for model_name, params in zip(self.model, self.af2_params):
             # mask diagonal to imply multimer prediction in base af
-            if not "multimer" in params.model_name:
+            if not "multimer" in model_name:
                 num_chains = len(jnp.unique(design["chain_index"]))
                 af_input_masked = af_input.block_diagonal(num_sequences=num_chains)
                 af_result: AFResult = self.af2m(params, self.key(), af_input_masked)
             else:
                 af_result: AFResult = self.af2m(params, self.key(), af_input)
-            scores[params.model_name] =  self.iptm(
+            scores[model_name] =  self.iptm(
                 result=af_result,
                 is_target=is_target
             )
