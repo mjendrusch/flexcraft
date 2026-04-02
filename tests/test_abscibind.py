@@ -20,7 +20,9 @@ def load_data(out_dir:str|Path):
     '''Load testing data from annotation file.'''
     if not isinstance(out_dir, Path):
         out_dir=Path(out_dir)
-
+    
+    if not out_dir.exists():
+        out_dir.mkdir()
 
     def get_csv(ann:dict, directory:Path=out_dir):
         if not directory.exists():
