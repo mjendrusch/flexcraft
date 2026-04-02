@@ -7,7 +7,6 @@ import flexcraft.sequence.aa_codes as aas
 from flexcraft.protocols.AbsciBind import AbsciBind
 from flexcraft.files.pdb import PDBFile
 from flexcraft.data.data import DesignData
-import requests
 import pandas as pd
 import numpy as np
 from flexcraft.structure.af import (
@@ -32,21 +31,23 @@ def load_data(out_dir:str|Path):
             if ann[n]:
                 url += f"/{ann[n]}"
         print(f"Downloading {url}...")
-        r = requests.get(url)
-        if "404: Not Found" in r.content.decode()[:100]:
-            print(f"{url}: {r.content}!")
-            return 0
-        with open(directory/ann["file name"], "wb") as f:
-            f.write(r.content)
+        urlretrieve(url, directory/ann["file name"])
+        
         print(f"Download complete")
         return 1
 
     def get_pdb(pdb_id:str, directory:Path=out_dir, base="https://opig.stats.ox.ac.uk/webapps/sabdab-sabpred/sabdab/pdb/", scheme="chothia"):
         if not directory.exists():
             directory.mkdir()
-        print(f"Downloading from {base}{pdb_id.lower()}/?scheme={scheme}...")
-        urlretrieve(f"{base}{pdb_id.lower()}/?scheme={scheme}", directory/f"{pdb_id.lower()}_{scheme}.pdb")
-        print(f"Download complete. File at {directory/f'{pdb_id.lower()}_{scheme}'}.")
+        file_path = directory/f"{pdb_id.lower()}_{scheme}.pdb"
+        if file_path.exists():
+            print(f"{file_path} exists ... skipping download.")
+            return 1
+        url = f"{base}{pdb_id.lower()}/?scheme={scheme}"
+        print(f"Downloading from {url}...")
+        urlretrieve(url, file_path)
+        print(f"Download complete. File at {file_path}.")
+        return 1
 
     # check for annotation with info on files
     assert (out_dir/"annotation.json").exists(), FileNotFoundError("No annotation file!")
@@ -70,7 +71,7 @@ def load_data(out_dir:str|Path):
         else:
             print(f"Data File for {n} exists.")
 
-        if not (out_dir/"pdb_files"/f"pdb{ann['PDB ID']}.ent").exists():
+        if not (out_dir/f"{ann['PDB ID'].lower()}_chothia.pdb").exists():
             print(f"PDB file for {n} not found. Fetching from PDB.")
             get_pdb(ann["PDB ID"])
         else:
@@ -201,8 +202,8 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kw
         ab_chain_ids = (scaffold_ann["Light Chain ID"], scaffold_ann["Heavy Chain ID"])
         
         # load the protein structure
-        positions = clean_chothia(data_dir/"pdb_files"/f"{annotations['PDB ID']}_chothia.pdb")
-        pdb = PDBFile(path=data_dir/"pdb_files"/f"{annotations['PDB ID']}_chothia_clean.pdb")
+        positions = clean_chothia(data_dir/f"{annotations['PDB ID']}_chothia.pdb")
+        pdb = PDBFile(path=data_dir/f"{annotations['PDB ID']}_chothia_clean.pdb")
         data = pdb.to_data()
         # filter chains
         chain_mask = data["chain"]==ag_chain_id|data["chain"]==ab_chain_ids[0]|data["chain"]==ab_chain_ids[1]
