@@ -111,21 +111,24 @@ def insert_CDRs(cdrs:list|tuple, chain_ids:list|tuple, positions:list|tuple, len
 
 def clean_chothia(file:Path|str,
     cdr_pos:dict = {"HCHAIN":(np.array([26,52,95]),np.array([9,4,7])),
-                    "LCHAIN":(np.array([24,50,89]),np.array([10,6,8]))}):
+                    "LCHAIN":(np.array([24,50,89]),np.array([10,6,8]))},
+    include:None|list = None):
     '''
     Clean a chothia structured pdb and return CDR positions.
     Args:
         file: pathlib.Path|str, relative or absolute path to the .pdb file
+        cdr_pos: standard cdr positions and lengths
+        include: list of chains to include in output
     Returns:
     - cdr_positions: dict, containing chains as key and tuple with positions (index in chain) and lengths of cdrs
-    - chain_indexes: dict, containing chain:start index in pdb 
+    - chain order: list, containing chain keys in order of appearance
     '''
     if isinstance(file, str):
         file = Path(file)
+    relevant_tags = ('ATOM', 'END', 'HETATM', 'LINK', 'MODEL', 'TER')
     out = {}
-    chains = {}
     gt = {}
-    index_chain = {}
+    chain_order = []
     current_chain = "init value"
     stripped = "init value"
     with open(file.with_suffix("").__str__()+"_clean.pdb", "w") as wf:
@@ -133,23 +136,34 @@ def clean_chothia(file:Path|str,
             l = "init value"
             while l:
                 l = rf.readline()
-                if (not l.startswith("ATOM")):
+                if not l.split(" ")[0] in relevant_tags:
                     wf.write(l)
                     if l.startswith("REMARK") and "PAIRED_HL" in l:
                         print(l)
                         # add chain pairing to output
                         s = l.split("PAIRED_HL")[-1].strip()
-                        pairing = {c.split("=")[1]:c.split("=")[0] for c in s.split(" ")}
-                        chains.update(pairing)
-                        gt.update({k:cdr_pos.get(v, None) for k,v in pairing.items()})
-                        # update out on deepcopy
-                        out.update({k: (v[0].copy(), v[1].copy()) for k, v in 
-                            ((k, cdr_pos.get(v, (np.array([]),np.array([])))) 
-                            for k, v in pairing.items())})
+                        if include:
+                            pairing = {c.split("=")[1]:c.split("=")[0] for c in s.split(" ")}
+                            gt.update({k:cdr_pos.get(v, None) for k,v in pairing.items() if k in include})
+                            # update out on deepcopy
+                            out.update({k: (v[0].copy(), v[1].copy()) for k, v in 
+                                ((k, cdr_pos.get(v, (np.array([]),np.array([])))) 
+                                for k, v in pairing.items()) if k in include})
+                        else:
+                            pairing = {c.split("=")[1]:c.split("=")[0] for c in s.split(" ")}
+                            gt.update({k:cdr_pos.get(v, None) for k,v in pairing.items()})
+                            # update out on deepcopy
+                            out.update({k: (v[0].copy(), v[1].copy()) for k, v in 
+                                ((k, cdr_pos.get(v, (np.array([]),np.array([])))) 
+                                for k, v in pairing.items())})
                     continue
                 
+                chain = l[21]
+                if include:
+                    if not chain in include:
+                        continue
                 if not l[22:31].strip().isnumeric():
-
+                    # check if stripped same as last line
                     if stripped == l[22:31].strip():
                         stripped = l[22:31].strip()
                         n = stripped
@@ -161,15 +175,15 @@ def clean_chothia(file:Path|str,
                         l = l[:22]+n+(" "*(11-len(n)))+l[33:]
                         wf.write(l)
                         continue
+
                     stripped = l[22:31].strip()
+                    # add stripped to cds
                     if stripped:
                         # get chathulu index
                         n = stripped
                         while not n[-1].isnumeric():
                             n = n[:-1]
                         n = int(n)
-                        chain = l[21]
-                        
                         # elongate if in cds in out
                         # keep gt to check positions further downstream
                         out[chain][1][(gt[chain][0] <= n)&((gt[chain][0]+gt[chain][1])>=n)] += 1
@@ -183,12 +197,13 @@ def clean_chothia(file:Path|str,
                         print(l)
                     
                 elif current_chain != l[21]:
+                    # add chain to chain order if chain changes
                     if l[21] in out.keys():
-                        index_chain[l[21]] = l[4:11].strip()
                         current_chain = l[21]
+                        chain_order.append(current_chain)
 
                 wf.write(l)
-    return out, index_chain
+    return out, chain_order
 
 def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kwargs):
     """Run abscibind on structures used to benchmark in origin1."""
@@ -225,7 +240,7 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kw
         ab_chain_ids = (scaffold_ann["Light Chain ID"], scaffold_ann["Heavy Chain ID"])
         
         # load the protein structure
-        positions = clean_chothia(data_dir/f"{annotations['PDB ID']}_chothia.pdb")
+        positions, chain_starts = clean_chothia(data_dir/f"{annotations['PDB ID']}_chothia.pdb")
         pdb = PDBFile(path=data_dir/f"{annotations['PDB ID']}_chothia_clean.pdb")
         data = pdb.to_data()
         # filter chains
