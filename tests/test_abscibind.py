@@ -117,13 +117,16 @@ def clean_chothia(file:Path|str,
     Args:
         file: pathlib.Path|str, relative or absolute path to the .pdb file
     Returns:
-        dict, containing chains as key and tuple with positions (index in chain) and lengths of cdrs
+    - cdr_positions: dict, containing chains as key and tuple with positions (index in chain) and lengths of cdrs
+    - chain_indexes: dict, containing chain:start index in pdb 
     '''
     if isinstance(file, str):
         file = Path(file)
     out = {}
     chains = {}
     gt = {}
+    index_chain = {}
+    current_chain = "init value"
     stripped = "init value"
     with open(file.with_suffix("").__str__()+"_clean.pdb", "w") as wf:
         with open(file, "r") as rf:
@@ -144,8 +147,8 @@ def clean_chothia(file:Path|str,
                             ((k, cdr_pos.get(v, (np.array([]),np.array([])))) 
                             for k, v in pairing.items())})
                     continue
-
-                elif not l[22:31].strip().isnumeric():
+                
+                if not l[22:31].strip().isnumeric():
 
                     if stripped == l[22:31].strip():
                         stripped = l[22:31].strip()
@@ -158,7 +161,6 @@ def clean_chothia(file:Path|str,
                         l = l[:22]+n+(" "*(11-len(n)))+l[33:]
                         wf.write(l)
                         continue
-                    
                     stripped = l[22:31].strip()
                     if stripped:
                         # get chathulu index
@@ -179,8 +181,14 @@ def clean_chothia(file:Path|str,
                         n = (" "*(4-len(n))) + n
                         l = l[:22]+n+(" "*(11-len(n)))+l[33:]
                         print(l)
+                    
+                elif current_chain != l[21]:
+                    if l[21] in out.keys():
+                        index_chain[l[21]] = l[4:11].strip()
+                        current_chain = l[21]
+
                 wf.write(l)
-    return out
+    return out, index_chain
 
 def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kwargs):
     """Run abscibind on structures used to benchmark in origin1."""
