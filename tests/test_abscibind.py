@@ -144,26 +144,41 @@ def clean_chothia(file:Path|str,
                             ((k, cdr_pos.get(v, (np.array([]),np.array([])))) 
                             for k, v in pairing.items())})
                     continue
-                elif stripped == l[22:31].strip():
-                    wf.write(l)
-                    continue
-                stripped = l[22:31].strip()
-                if stripped and not stripped.isnumeric():
-                    # get chathulu index
-                    n = stripped
-                    while not n[-1].isnumeric():
-                        n = n[:-1]
-                    n = int(n)
-                    chain = l[21]
-                    
-                    # elongate if in cds in out
-                    # keep gt to check positions further downstream
-                    out[chain][1][(gt[chain][0] <= n)&((gt[chain][0]+gt[chain][1])>=n)] += 1
-                    # shift all further cds in out
-                    # keep gt for downstream alignment
-                    out[chain][0][gt[chain][0] > n] += 1
 
-                    l = l[:24]+str(n)+(" "*(9-len(stripped)))+l[33:]
+                elif not l[22:31].strip().isnumeric():
+
+                    if stripped == l[22:31].strip():
+                        stripped = l[22:31].strip()
+                        n = stripped
+                        while not n[-1].isnumeric():
+                            n = n[:-1]
+                        n = int(n)
+                        n = str(n)
+                        n = (" "*(4-len(n))) + n
+                        l = l[:22]+n+(" "*(11-len(n)))+l[33:]
+                        wf.write(l)
+                        continue
+                    
+                    stripped = l[22:31].strip()
+                    if stripped:
+                        # get chathulu index
+                        n = stripped
+                        while not n[-1].isnumeric():
+                            n = n[:-1]
+                        n = int(n)
+                        chain = l[21]
+                        
+                        # elongate if in cds in out
+                        # keep gt to check positions further downstream
+                        out[chain][1][(gt[chain][0] <= n)&((gt[chain][0]+gt[chain][1])>=n)] += 1
+                        # shift all further cds in out
+                        # keep gt for downstream alignment
+                        out[chain][0][gt[chain][0] > n] += 1
+                        print(l, n)
+                        n = str(n)
+                        n = (" "*(4-len(n))) + n
+                        l = l[:22]+n+(" "*(11-len(n)))+l[33:]
+                        print(l)
                 wf.write(l)
     return out
 
