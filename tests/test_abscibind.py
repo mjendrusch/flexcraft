@@ -1,10 +1,10 @@
 '''Script for testing the AbsciBind protocol ipTM scoring.'''
 
-import flexcraft.sequence.aa_codes as aas
-from flexcraft.protocols.AbsciBind import AbsciBind
 from pathlib import Path
 import json
-from Bio.PDB import PDBList
+
+import flexcraft.sequence.aa_codes as aas
+from flexcraft.protocols.AbsciBind import AbsciBind
 from flexcraft.files.pdb import PDBFile
 from flexcraft.data.data import DesignData
 import requests
@@ -16,11 +16,15 @@ import jax
 import jax.numpy as jnp
 
 def load_data(out_dir:str|Path):
+    from urllib.request import urlretrieve
     '''Load testing data from annotation file.'''
     if not isinstance(out_dir, Path):
         out_dir=Path(out_dir)
-    pdbl = PDBList()
+
+
     def get_csv(ann:dict, directory:Path=out_dir):
+        if not directory.exists():
+            directory.mkdir()
         url = ann['github repository']+"/main"
         for n in ["folder", "file name"]:
             if ann[n]:
@@ -35,16 +39,12 @@ def load_data(out_dir:str|Path):
         print(f"Download complete")
         return 1
 
-    def get_pdb(pdb_id:str, directory:Path=out_dir, pdbl=pdbl):
-        
-        print(f"Downloading {pdb_id}...")
-        file_path = pdbl.retrieve_pdb_file(
-            pdb_id,
-            file_format="pdb",
-            pdir=directory/"pdb_files"
-        )
-
-        print(f"Download complete. File at {file_path}.")
+    def get_pdb(pdb_id:str, directory:Path=out_dir, base="https://opig.stats.ox.ac.uk/webapps/sabdab-sabpred/sabdab/pdb/", scheme="chothia"):
+        if not directory.exists():
+            directory.mkdir()
+        print(f"Downloading from {base}{pdb_id.lower()}/?scheme={scheme}...")
+        urlretrieve(f"{base}{pdb_id.lower()}/?scheme={scheme}", directory/f"{pdb_id.lower()}_{scheme}.pdb")
+        print(f"Download complete. File at {directory/f'{pdb_id.lower()}_{scheme}'}.")
 
     # check for annotation with info on files
     assert (out_dir/"annotation.json").exists(), FileNotFoundError("No annotation file!")
@@ -58,7 +58,7 @@ def load_data(out_dir:str|Path):
         con = False
         for key, value in ann.items():
             if not value and not key in ["folder",]:
-                print(f"{key} for {n} is missing! Skipping...")
+                print(f"---{key} for {n} is missing! Skipping...---")
                 con = True
         if con:
             continue
@@ -75,7 +75,7 @@ def load_data(out_dir:str|Path):
             print(f"PDB file for {n} exists.")
     print("Checked all test files. Good to go...")
 
-#load_data("flexcraft/data/o1_iptm_scoring")
+load_data("flexcraft/data/o1_iptm_scoring")
 
 def insert_CDRs(cdrs:list|tuple, chain_ids:list|tuple, positions:list|tuple, lengths:list|tuple, scaffold:DesignData):
     """
@@ -163,6 +163,7 @@ def clean_chothia(file:Path|str,
                     l = l[:24]+str(n)+(" "*(9-len(stripped)))+l[33:]
                 wf.write(l)
     return out
+
 def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kwargs):
     """Run abscibind on structures used to benchmark in origin1."""
 
@@ -198,8 +199,8 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kw
         ab_chain_ids = (scaffold_ann["Light Chain ID"], scaffold_ann["Heavy Chain ID"])
         
         # load the protein structure
-        positions = clean_chothia(data_dir/"pdb_files"/f"{annotations["PDB ID"]}_chothia.pdb")
-        pdb = PDBFile(path=data_dir/"pdb_files"/f"{annotations["PDB ID"]}_chothia_clean.pdb")
+        positions = clean_chothia(data_dir/"pdb_files"/f"{annotations['PDB ID']}_chothia.pdb")
+        pdb = PDBFile(path=data_dir/"pdb_files"/f"{annotations['PDB ID']}_chothia_clean.pdb")
         data = pdb.to_data()
         # filter chains
         chain_mask = data["chain"]==ag_chain_id|data["chain"]==ab_chain_ids[0]|data["chain"]==ab_chain_ids[1]
@@ -224,14 +225,3 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kw
     out_data.to_csv(data_dir/"ipTM_data.csv")
     return out_data
 
-
-
-
-
-
-def test():
-    # mask cdrs and predict cdr structure with afm (where: false for modified cdr)
-    # insert cdr regions in result
-    # use abscibind to calculate iptm
-
-    pass
