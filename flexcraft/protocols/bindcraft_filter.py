@@ -11,6 +11,7 @@ from flexcraft.structure.af import (
 from flexcraft.rosetta.relax import fastrelax
 from flexcraft.rosetta.interface_analyzer import score_interface
 from salad.modules.utils.geometry import index_align
+from flexcraft.structure.metrics import RMSD
 
 class BindCraftProperties:
     def __init__(self, path, key, af_parameter_path, filter=None, 
@@ -114,17 +115,19 @@ class BindCraftProperties:
         relaxed_data = relaxed.to_data()
         if_scores, if_aa = score_interface(relaxed, is_target)
         # alignment / RMSD
-        aligned_positions = index_align(
-            relaxed_data["atom_positions"], design["atom_positions"], design["batch_index"], design["mask"])
-        result["RMSD"] = jnp.sqrt(((aligned_positions[:, 1] - design["atom_positions"][:, 1]) ** 2).mean())
-        aligned_positions = index_align(
-            relaxed_data["atom_positions"][is_target], design["atom_positions"][is_target],
-            design["batch_index"][is_target], design["mask"][is_target])
-        result["Target_RMSD"] = jnp.sqrt(((aligned_positions[:, 1] - design["atom_positions"][is_target, 1]) ** 2).mean())
-        aligned_positions = index_align(
-            relaxed_data["atom_positions"][is_binder], design["atom_positions"][is_binder],
-            design["batch_index"][is_binder], design["mask"][is_binder])
-        result["Binder_RMSD"] = jnp.sqrt(((aligned_positions[:, 1] - design["atom_positions"][is_binder, 1]) ** 2).mean())
+        result["RMSD"] = RMSD()(
+            relaxed_data, design,
+            design["batch_index"], design["mask"])
+        relaxed_target = relaxed_data[is_target]
+        design_target = design[is_target]
+        result["Target_RMSD"] = RMSD()(
+            relaxed_target, design_target,
+            design_target["batch_index"], design_target["mask"])
+        relaxed_binder = relaxed_data[is_binder]
+        design_binder = design[is_binder]
+        result["Binder_RMSD"] = RMSD()(
+            relaxed_binder, design_binder,
+            design_binder["batch_index"], design_binder["mask"])
         # adapted from BindCraft
         result.update({
             'Binder_Energy_Score': if_scores['binder_score'],

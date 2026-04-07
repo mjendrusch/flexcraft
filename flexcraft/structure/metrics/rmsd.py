@@ -14,6 +14,14 @@ from flexcraft.data.data import DesignData
 def _rmsd_default_atoms():
     return ["CA"]
 
+def _data_to_pos(x):
+    if hasattr(x, "to_data"):
+        x = x.to_data()
+        assert isinstance(x, DesignData)
+    if isinstance(x, DesignData):
+        x = x["atom_positions"]
+    return x
+
 @dataclass
 class RMSD:
     """Root mean square deviation (RMSD) metric.
@@ -40,16 +48,8 @@ class RMSD:
             order.index(a) for a in self.atoms], dtype=np.int32)
         # get positions from design data objects, otherwise
         # assume that the input is atom positions
-        if hasattr(x, "to_data"):
-            x = x.to_data()
-            assert isinstance(x, DesignData)
-        if hasattr(x, "to_data"):
-            y = y.to_data()
-            assert isinstance(y, DesignData)
-        if isinstance(x, DesignData):
-            x = x["atom_positions"]
-        if isinstance(y, DesignData):
-            y = y["atom_positions"]
+        x = _data_to_pos(x)
+        y = _data_to_pos(y)
         if mask is None:
             mask = np.ones(x.shape[:1], dtype=np.bool_)
         if eval_mask is None:
