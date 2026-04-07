@@ -507,7 +507,7 @@ class AFResult:
             plddt=self.plddt,
             pae=self.pae,
             distogram=self.distance
-        ))
+        )).untie()
 
     def contact_probability(self, contact_distance=10.0) -> jnp.ndarray:
         """Compute the distogram predicted contact probability for each

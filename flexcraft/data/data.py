@@ -83,7 +83,7 @@ class DesignData:
             subchain = DesignData.from_length(len(subseq))
             subchain = subchain.update(aa=aas.encode(subseq, aas.AF2_CODE))
             result.append(subchain)
-        return DesignData.concatenate(result, sep_chains=True)
+        return DesignData.concatenate(result, sep_chains=True).untie()
 
     @classmethod
     def from_dict(cls, data: dict) -> "DesignData":
@@ -295,7 +295,8 @@ class DesignData:
     def concatenate(cls: "type[DesignData]",
                     items: List["DesignData"],
                     sep_chains=True,
-                    sep_batch=False) -> "DesignData":
+                    sep_batch=False,
+                    preserve_tie=False) -> "DesignData":
         """Concatenate multiple DesignData objects, optionally updating chain and batch indices.
         
         Args:
@@ -312,6 +313,8 @@ class DesignData:
             result.data["chain_index"] = _sep_groups([c.chain_index for c in items])
         if sep_batch and "batch_index" in items[0].data:
             result.data["batch_index"] = _sep_groups([c["batch_index"] for c in items])
+        if not preserve_tie:
+            result = result.untie()
         return result
 
     def split(self, index=None) -> List["DesignData"]:
@@ -326,8 +329,8 @@ class DesignData:
 
     def untie(self) -> "DesignData":
         """Drop tie-index information from a DesignData object."""
-        return self.update(tie_index=jnp.arange(self["tie_index"].shape[0]),
-                           tie_weights=jnp.ones_like(self["tie_index"], dtype=jnp.float32))
+        return self.update(tie_index=jnp.arange(self["residue_index"].shape[0]),
+                           tie_weights=jnp.ones_like(self["residue_index"], dtype=jnp.float32))
 
     def tie(self, tie_blocks) -> "DesignData":
         """Add a tie index to a DesignData object based on a list of tie blocks.
