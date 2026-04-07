@@ -259,10 +259,13 @@ def _convert_chains(chain_ids:np.ndarray):
 def abscibind_pipe(data_dir:str|Path,
     af_parameter_path,
     af2_key,
-    targets:list|None = None,
+    targets:str|list|None = None,
     max_designs:None|int = None,
     **abscibind_kwargs):
     """Run abscibind on structures used to benchmark in origin1."""
+
+    if isinstance(targets, str):
+        targets = [targets]
 
     if not isinstance(data_dir, Path):
         data_dir = Path(data_dir)
