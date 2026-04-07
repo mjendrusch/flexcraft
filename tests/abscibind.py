@@ -256,7 +256,12 @@ def _convert_chains(chain_ids:np.ndarray):
     return chain_ids
 
 
-def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, targets:list|None = None,**abscibind_kwargs):
+def abscibind_pipe(data_dir:str|Path,
+    af_parameter_path,
+    af2_key,
+    targets:list|None = None,
+    max_designs:None|int = None,
+    **abscibind_kwargs):
     """Run abscibind on structures used to benchmark in origin1."""
 
     if not isinstance(data_dir, Path):
@@ -293,6 +298,8 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, targets:list|N
             print(f"CSV file for {scaffold_name} is not in {data_dir}. Expected name from annotations.json: {scaffold_ann['file name']}!")
             continue
         df = pd.read_csv(csv_path, header=0, index_col=None)
+        if max_designs:
+            df = df.iloc[:max_designs]
         ag_chain_id = scaffold_ann["Antigen Chain ID"]
         ab_chain_ids = (scaffold_ann["Light Chain ID"], scaffold_ann["Heavy Chain ID"])
         
