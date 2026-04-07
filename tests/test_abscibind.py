@@ -13,13 +13,7 @@ from flexcraft.files.pdb import PDBFile
 from flexcraft.structure.af import AFInput, AFResult
 from flexcraft.utils.rng import Keygen
 
-from flexcraft.tests.abscibind import (
-    load_data,
-    insert_CDRs,
-    clean_chothia,
-    abscibind_pipe,
-)
-
+from abscibind import *
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run AbsciBind ipTM scoring benchmark.")
@@ -35,8 +29,6 @@ def parse_args():
                    help="Maximum number of designs per scaffold (default: all).")
     p.add_argument("--fetch_data", action="store_true",
                    help="Download missing PDB/CSV files before running.")
-    p.add_argument("--out_csv", type=Path, default=None,
-                   help="Output CSV path (default: <data_dir>/ipTM_data.csv).")
     return p.parse_args()
 
 
