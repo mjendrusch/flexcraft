@@ -13,9 +13,9 @@ from flexcraft.structure.af import (
     AFInput, AFResult, get_model_haiku_params, model_config, make_af2, make_predict)
 import jax
 import jax.numpy as jnp
+from urllib.request import urlretrieve
 
 def load_data(out_dir:str|Path):
-    from urllib.request import urlretrieve
     '''Load testing data from annotation file.'''
     if not isinstance(out_dir, Path):
         out_dir=Path(out_dir)
@@ -36,7 +36,7 @@ def load_data(out_dir:str|Path):
         print(f"Download complete")
         return 1
 
-    def get_pdb(pdb_id:str, directory:Path=out_dir, base="https://opig.stats.ox.ac.uk/webapps/sabdab-sabpred/sabdab/pdb/", scheme="chothia"):
+    def get_pdb(pdb_id:str, directory:Path = out_dir, base = "https://opig.stats.ox.ac.uk/webapps/sabdab-sabpred/sabdab/pdb/", scheme="chothia"):
         if not directory.exists():
             directory.mkdir()
         file_path = directory/f"{pdb_id.lower()}_{scheme}.pdb"
@@ -50,7 +50,7 @@ def load_data(out_dir:str|Path):
         return 1
 
     # check for annotation with info on files
-    assert (out_dir/"annotation.json").exists(), FileNotFoundError("No annotation file!")
+    assert (out_dir/"annotation.json").exists(), "No annotation file!"
     with open(out_dir/"annotation.json", "r") as rf:
         annotations = json.load(rf)
 
@@ -58,12 +58,12 @@ def load_data(out_dir:str|Path):
     
     # check for files
     for n, ann in annotations.items():
-        con = False
+        skip = False
         for key, value in ann.items():
             if not value and not key in ["folder",]:
                 print(f"---{key} for {n} is missing! Skipping...---")
-                con = True
-        if con:
+                skip = True
+        if skip:
             continue
         if not ann["file name"] in existing_files:
             print(f"Data File for {n} not in {out_dir}, trying to fetch from annotation.")
@@ -78,7 +78,7 @@ def load_data(out_dir:str|Path):
             print(f"PDB file for {n} exists.")
     print("Checked all test files. Good to go...")
 
-load_data("flexcraft/data/o1_iptm_scoring")
+#load_data("flexcraft/data/o1_iptm_scoring")
 
 def insert_CDRs(
         cdrs:list[str]|tuple[str],
@@ -117,8 +117,8 @@ def insert_CDRs(
     sorter = np.argsort(positions)
     cdrs = np.array(cdrs)[sorter] # type: ignore
     # add 0 to start the sequence for out
-    lengths = np.concat([[0],np.array(lengths)[sorter]]) # type: ignore
-    positions = np.concat([[0],np.array(positions)[sorter]]) # type: ignore
+    lengths = np.concatenate([[0],np.array(lengths)[sorter]]) # type: ignore
+    positions = np.concatenate([[0],np.array(positions)[sorter]]) # type: ignore
     
     # convert inserts to designdata
     inserts = [DesignData.from_sequence(cdr) for cdr in cdrs]
@@ -134,9 +134,9 @@ def insert_CDRs(
         conv_scaffold[positions[-1]+lengths[-1]:]],
         sep_chains=False, sep_batch=False)
     
-    mask = np.concat([
+    mask = np.concatenate([
         *[
-        np.concat([mask[positions[n]+lengths[n]:positions[n+1]], np.zeros_like(inserts[n]["chain_index"], dtype=np.bool_)])
+        np.concatenate([mask[positions[n]+lengths[n]:positions[n+1]], np.zeros_like(inserts[n]["chain_index"], dtype=np.bool_)])
         for n in range(len(cdrs))
         ],
         mask[positions[-1]+lengths[-1]:]]
@@ -161,13 +161,15 @@ def clean_chothia(file:Path|str,
     '''
     if isinstance(file, str):
         file = Path(file)
+    out_path = Path(file.with_suffix("").__str__()+"_clean.pdb")
+
     relevant_tags = ('ATOM', 'END', 'HETATM', 'LINK', 'MODEL', 'TER')
     out = {}
     gt = {}
     chain_order = []
     current_chain = "init value"
     stripped = "init value"
-    with open(file.with_suffix("").__str__()+"_clean.pdb", "w") as wf:
+    with open(out_path, "w") as wf:
         with open(file, "r") as rf:
             l = "init value"
             while l:
@@ -306,9 +308,9 @@ def abscibind_pipe(data_dir:str|Path, af_parameter_path, af2_key, **abscibind_kw
             
             data_conv = update_structure(data_conv, where=mask)
             # calculate iptm
-            iptm = abscibind(design=data_conv, is_target=(data["chain_index"]==ag_chain_id))
+            iptm = abscibind(design=data_conv, is_target=(data_conv["chain_index"]==ag_chain_id))
     
-            out_data.iloc[-1] = [scaffold_name, [i for i in iptm.values()][0], *d_tuple]
+            out_data.iloc[len(out_data)] = [scaffold_name, iptm[abscibind.model[0]], *d_tuple]
     out_data.to_csv(data_dir/"ipTM_data.csv")
     return out_data
 
