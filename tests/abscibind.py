@@ -177,7 +177,6 @@ def clean_chothia(file:Path|str,
                 if not l.split(" ")[0] in relevant_tags:
                     wf.write(l)
                     if l.startswith("REMARK") and "PAIRED_HL" in l:
-                        print(l)
                         # add chain pairing to output
                         s = l.split("PAIRED_HL")[-1].strip()
                         if include:
@@ -228,11 +227,9 @@ def clean_chothia(file:Path|str,
                         # shift all further cds in out
                         # keep gt for downstream alignment
                         out[chain][0][gt[chain][0] > n] += 1
-                        print(l, n)
                         n = str(n)
                         n = (" "*(4-len(n))) + n
                         l = l[:22]+n+(" "*(11-len(n)))+l[33:]
-                        print(l)
                     
                 elif current_chain != l[21]:
                     # add chain to chain order if chain changes
