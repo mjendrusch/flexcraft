@@ -17,7 +17,7 @@ from abscibind import *
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run AbsciBind ipTM scoring benchmark.")
-    p.add_argument("--data_dir", type=Path, default=Path("flexcraft/data/o1_iptm_scoring"),
+    p.add_argument("--data_dir", type=Path, default=Path("data/o1_iptm_scoring"),
                    help="Directory containing annotation.json, PDBs and CSVs.")
     p.add_argument("--af_params", type=Path, required=True,
                    help="Path to AlphaFold2 parameter directory.")
