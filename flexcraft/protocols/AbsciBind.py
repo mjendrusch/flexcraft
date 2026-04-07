@@ -35,8 +35,8 @@ class AbsciBind:
         self.key = key
         self.af_parameter_path = af_parameter_path
         self.num_recycle = num_recycle
-        self.use_multimer = np.array(["multimer" in m for m in model]).all()
-        if not self.use_multimer and np.array(["multimer" in m for m in model]).any():
+        self.use_multimer = jnp.array(["multimer" in m for m in model]).all()
+        if not self.use_multimer and jnp.array(["multimer" in m for m in model]).any():
             raise ValueError("Either use all multimer or all native models. Combination is not accepted!")
         self.af2_params = [
             get_model_haiku_params(
