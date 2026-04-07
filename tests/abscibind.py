@@ -244,6 +244,8 @@ def _convert_chains(chain_ids:np.ndarray):
     '''
     Convert str ids into numeric index if not int.
     Otherwise returns chain_ids.
+    Notes:
+        id numbers are derived from unique sorted ids
     '''
     if chain_ids.dtype != int:
         unique_chain_ids = np.unique(chain_ids)
@@ -304,11 +306,13 @@ def abscibind_pipe(data_dir:str|Path,
         ab_chain_ids = (scaffold_ann["Light Chain ID"], scaffold_ann["Heavy Chain ID"])
         
         # load the protein structure
-        positions, _ = clean_chothia(data_dir/f"{scaffold_ann['PDB ID'].lower()}_chothia.pdb")
+        positions, chain_order = clean_chothia(data_dir/f"{scaffold_ann['PDB ID'].lower()}_chothia.pdb")
         pdb = PDBFile(path=data_dir/f"{scaffold_ann['PDB ID'].lower()}_chothia_clean.pdb", convert_chains=False)
         data = pdb.to_data()
         if data["batch_index"].dtype != int:
             data = data.update(batch_index = np.zeros_like(data["chain_index"], dtype=np.int16))
+        # convert id to int index, analogously to _convert_chains
+        ag_chain_index = sorted(chain_order).index(ag_chain_id)
         positions = positions[ab_chain_ids[1]]
         # iterate over desgins and insert hcdrs
         for d_tuple in df[["HCDR1", "HCDR2", "HCDR3","KD (nM)", "Binder"]].itertuples(index=False, name=None):
@@ -318,7 +322,7 @@ def abscibind_pipe(data_dir:str|Path,
             
             data_conv = update_structure(data_conv, where=mask)
             # calculate iptm
-            iptm = abscibind(design=data_conv, is_target=(data_conv["chain_index"]==ag_chain_id))
+            iptm = abscibind(design=data_conv, is_target=(data_conv["chain_index"]==ag_chain_index))
     
             out_data.iloc[len(out_data)] = [scaffold_name, iptm[abscibind.model[0]], *d_tuple]
     out_data.to_csv(data_dir/"ipTM_data.csv")
