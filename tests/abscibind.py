@@ -319,11 +319,10 @@ def abscibind_pipe(data_dir:str|Path,
             # insert CDRs
             data_conv, mask = insert_CDRs(cdrs=d_tuple[:3], chain_id=ab_chain_ids[1], positions=positions[0], lengths=positions[1], scaffold=data)
             # predict structure with insert
-            
             data_conv = update_structure(data_conv, where=mask)
             # calculate iptm
             iptm = abscibind(design=data_conv, is_target=(data_conv["chain_index"]==ag_chain_index))
-    
-            out_data.iloc[len(out_data)] = [scaffold_name, iptm[abscibind.model[0]], *d_tuple]
+            out_data.loc[len(out_data), :] = [scaffold_name, *[v for v in iptm[abscibind.model[0]].values()], *d_tuple]
+            
     out_data.to_csv(data_dir/"ipTM_data.csv")
     return out_data
