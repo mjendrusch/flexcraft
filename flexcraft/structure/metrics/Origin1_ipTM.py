@@ -9,10 +9,11 @@ from dataclasses import dataclass
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax import jit
 
 from flexcraft.structure.af._data import AFResult
 
-
+@jit
 def _d0(L) -> jnp.ndarray:
     """TM-score normalization factor (Origin-1, Suppl. §7.5).
 
@@ -21,7 +22,7 @@ def _d0(L) -> jnp.ndarray:
     """
     return jnp.where(L >= 19, 1.34 * (L - 15) ** (1 / 3) - 1.8, 1.0)
 
-
+@jit
 def _ptm_matrix(probabilities: jnp.ndarray, L: int) -> jnp.ndarray:
     """Compute the element-wise pTM score matrix.
 
@@ -42,7 +43,7 @@ def _ptm_matrix(probabilities: jnp.ndarray, L: int) -> jnp.ndarray:
     weights = 1 / (1 + (delta / d) ** 2)   # shape (64,)
     return (probabilities * weights).sum(axis=-1)
 
-
+@jit
 def _iptm_A_given_B(
     ptm: jnp.ndarray,
     A_mask: jnp.ndarray,
@@ -83,9 +84,8 @@ class AbsciBindIPTM:
     Usage::
 
         scorer = AbsciBindIPTM()
-        ab_mask = result.chain_index == 0   # antibody chain(s)
         is_target = result.chain_index == 1   # antigen chain(s)
-        scores = scorer(result, ab_mask, is_target)
+        scores = scorer(result, is_target)
         print(scores["iptm"])
 
     Reference: Levine et al. 2026, https://doi.org/10.64898/2026.01.14.699389
