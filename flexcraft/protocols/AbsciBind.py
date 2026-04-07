@@ -35,6 +35,9 @@ class AbsciBind:
         self.key = key
         self.af_parameter_path = af_parameter_path
         self.num_recycle = num_recycle
+        self.use_multimer = np.array(["multimer" in m for m in model]).all()
+        if not self.use_multimer and np.array(["multimer" in m for m in model]).any():
+            raise ValueError("Either use all multimer or all native models. Combination is not accepted!")
         self.af2_params = [
             get_model_haiku_params(
                 model_name=model,
@@ -42,7 +45,7 @@ class AbsciBind:
             for model in self.model
         ]
         self.af2_config = model_config(self.model[0])
-        self.af2m = jax.jit(make_predict(make_af2(self.af2_config), num_recycle=self.num_recycle))
+        self.af2m = jax.jit(make_predict(make_af2(self.af2_config, use_multimer=self.use_multimer), num_recycle=self.num_recycle))
         self.iptm = AbsciBindIPTM()
         
     def __call__(self, design:DesignData, is_target:jnp.ndarray, where:bool=True):
@@ -59,7 +62,7 @@ class AbsciBind:
         scores = {}
         for model_name, params in zip(self.model, self.af2_params):
             # mask diagonal to imply multimer prediction in base af
-            if not "multimer" in model_name:
+            if not self.use_multimer:
                 num_chains = len(jnp.unique(design["chain_index"]))
                 af_input_masked = af_input.block_diagonal(num_sequences=num_chains)
                 af_result: AFResult = self.af2m(params, self.key(), af_input_masked)
