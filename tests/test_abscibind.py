@@ -53,7 +53,6 @@ def main():
         af2_key=key,
         targets=args.targets,
         max_designs=args.max_designs,
-        out_csv=args.out_csv,
     )
     print(out)
 
