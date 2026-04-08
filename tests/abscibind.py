@@ -13,6 +13,7 @@ from flexcraft.structure.af import (
     AFInput, AFResult, get_model_haiku_params, model_config, make_af2, make_predict)
 import jax
 import jax.numpy as jnp
+import gc
 from urllib.request import urlretrieve
 
 def load_data(out_dir:str|Path):
@@ -292,6 +293,7 @@ def abscibind_pipe(data_dir:str|Path,
     out_data = pd.DataFrame(columns=["scaffold", "ipTM","default_iptm", "ab_iptm", "HCDR1","HCDR2","HCDR3","KD (nM)","Binder"])
 
     for scaffold_name, scaffold_ann in annotations.items():
+        print(f"---{scaffold_name}---")
         if targets and not scaffold_name in targets:
             print(f"Skipping {scaffold_name}, as omitted from targets...")
             continue
@@ -324,18 +326,27 @@ def abscibind_pipe(data_dir:str|Path,
         ag_chain_index = sorted(chain_order).index(ag_chain_id)
         h_chain_index = sorted(chain_order).index(h_chain_id)
         l_chain_index = sorted(chain_order).index(l_chain_id)
+        mask = np.zeros_like(data["chain_index"], dtype=np.bool_)
+        mask[data["chain_index"]==ag_chain_index] = True
+        mask[data["chain_index"]==h_chain_index] = True
+        mask[data["chain_index"]==l_chain_index] = True
+        data = data[mask]
         
-        #print("---scaffold data---",
-        #    *[f"{k}:{v.shape}" for k,v in data.items()],
-        #    f"ag_chain_index:{ag_chain_index}",
-        #    f"ag_chain_id:{ag_chain_id}",
-        #    f"sorted(chain_order):{sorted(chain_order)}",
-        #    f"chain_order:{chain_order}",
-        #    f"jnp.unique(data['chain_index']):{jnp.unique(data['chain_index'], return_counts=True)}",
-        #    sep="\n")
+        print("---scaffold data---",
+            *[f"{k}:{v.shape}" for k,v in data.items()],
+            f"ag_chain_index:{ag_chain_index}",
+            f"ag_chain_id:{ag_chain_id}",
+            f"sorted(chain_order):{sorted(chain_order)}",
+            f"chain_order:{chain_order}",
+            f"jnp.unique(data['chain_index']):{jnp.unique(data['chain_index'], return_counts=True)}",
+            sep="\n")
+        if len(data["aa"])>2000:
+            print(f"{scaffold_name} has length >2000 aa! Skipping to avoid OOM...")
+            continue
 
         # iterate over desgins and insert hcdrs
         for d_tuple in df[["HCDR1", "HCDR2", "HCDR3","KD (nM)", "Binder"]].itertuples(index=False, name=None):
+            print(f"-Construct-",d_tuple, sep="\n")
             # insert CDRs
             data_conv, mask = insert_CDRs(cdrs=d_tuple[:3], chain_id=h_chain_index, positions=positions[0], lengths=positions[1], scaffold=data)
             #print("---data_conv---",
@@ -346,14 +357,15 @@ def abscibind_pipe(data_dir:str|Path,
             # predict structure with insert
             data_conv = update_structure(data_conv, where=mask)
             is_target = data_conv["chain_index"]==ag_chain_index
-            #print("---updated structure---",
-            #    *[f"{k}:{v.shape}" for k,v in data_conv.items()],
-            #    f"is_target shape:{is_target.shape}",
-            #    f"is_target sum():{is_target.sum()}",
-            #    sep="\n")
+            print("---updated structure---",
+                *[f"{k}:{v.shape}" for k,v in data_conv.items()],
+                f"is_target shape:{is_target.shape}",
+                f"is_target sum():{is_target.sum()}",
+                sep="\n")
             # calculate iptm
             iptm = abscibind(design=data_conv, is_target=is_target)
+            print(f"iptm:", *[f"{k}:{v}"for k,v in iptm[abscibind.model[0]].items()], sep="\n")
             out_data.loc[len(out_data), :] = [scaffold_name, *[v for v in iptm[abscibind.model[0]].values()], *d_tuple]
-            
+            gc.collect()
     out_data.to_csv(data_dir/"ipTM_data.csv")
     return out_data
