@@ -48,7 +48,7 @@ class AbsciBind:
         self.af2m = jax.jit(make_predict(make_af2(self.af2_config, use_multimer=self.use_multimer), num_recycle=self.num_recycle))
         self.iptm = AbsciBindIPTM()
         
-    def __call__(self, design:DesignData, is_target:jnp.ndarray, where:bool=True):
+    def __call__(self, design:DesignData, is_target:jnp.ndarray, where:bool=True, save:Path|None=None):
         '''
         Calculate ipTM scores for the design.
         Args:
@@ -68,6 +68,8 @@ class AbsciBind:
                 af_result: AFResult = self.af2m(params, self.key(), af_input_masked)
             else:
                 af_result: AFResult = self.af2m(params, self.key(), af_input)
+            if save:
+                af_result.save_pdb(f"{save.withsuffix('')}_{model_name}.pdb")
             scores[model_name] =  self.iptm(
                 result=af_result,
                 is_target=is_target

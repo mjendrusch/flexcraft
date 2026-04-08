@@ -393,7 +393,7 @@ def abscibind_pipe(data_dir:str|Path,
                     f"is_target sum():{is_target.sum()}",
                     sep="\n")
             # calculate iptm
-            iptm = abscibind(design=data_conv, is_target=is_target)
+            iptm = abscibind(design=data_conv, is_target=is_target, save=save)
             if verbose:
                 print(f"iptm:", *[f"{k}:{v}"for k,v in iptm[abscibind.model[0]].items()], sep="\n")
             out_data.loc[len(out_data), :] = [scaffold_name, *[v for v in iptm[abscibind.model[0]].values()], *d_tuple]
