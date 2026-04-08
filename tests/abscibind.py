@@ -94,7 +94,7 @@ def insert_CDRs(
         cdrs: list of str, contains strings for each CDR
         chain_ids: list of chain_index for each CDR
         positions: start position of each CDR within its chain
-        lengths: lengths of CDRs in scaffold
+        lengths: lengths of CDRs in scaffoldzeros_like
         scaffold: DesignData object, scaffold for insertion
     Returns:
         Inserted data: DesignData object with manipulated Antibody structure
@@ -130,16 +130,15 @@ def insert_CDRs(
     out = DesignData.concatenate([
         scaffold[:chain_start],
         *[
-        scaffold[positions[n]+lengths[n]:positions[n+1]] + inserts[n]
+        DesignData.concatenate([scaffold[positions[n]+lengths[n]:positions[n+1]], inserts[n]], sep_chains=False, sep_batch=False)
         for n in range(len(cdrs))
         ],
         scaffold[positions[-1]+lengths[-1]:],
         #scaffold[chain_end+1:],
         ],
         sep_chains=False, sep_batch=False)
+    out = out.update(residue_index = jnp.arange(len(out["aa"])))
 
-    #print(f"jnp.unique(out['chain_index']):{jnp.unique(out['chain_index'], return_counts=True)}",)
-    
     mask = np.concatenate([
         mask[:chain_start],
         *[
@@ -297,7 +296,7 @@ def abscibind_pipe(data_dir:str|Path,
     out_data = pd.DataFrame(columns=["scaffold", "ipTM","default_iptm", "ab_iptm", "HCDR1","HCDR2","HCDR3","KD (nM)","Binder"])
 
     for scaffold_name, scaffold_ann in annotations.items():
-        print(f"---{scaffold_name}---")
+        print(f"\n---{scaffold_name}---\n")
         if targets and not scaffold_name in targets:
             print(f"Skipping {scaffold_name}, as omitted from targets...")
             continue
@@ -357,6 +356,7 @@ def abscibind_pipe(data_dir:str|Path,
             if clip_stop == -1:
                 clip_stop = ag_stop
             data = data.index([slice(0,ag_start,), slice(ag_start+clip_start,ag_start+clip_stop), slice(ag_stop+1, -1)])
+        
         if verbose:
             print("---scaffold data---",
                 *[f"{k}:{v.shape}" for k,v in data.items()],
@@ -366,20 +366,25 @@ def abscibind_pipe(data_dir:str|Path,
                 f"chain_order:{chain_order}",
                 f"jnp.unique(data['chain_index']):{jnp.unique(data['chain_index'], return_counts=True)}",
                 sep="\n")
+
         if len(data["aa"])>2000:
             print(f"{scaffold_name} has length >2000 aa! Skipping to avoid OOM...")
             continue
 
         # iterate over desgins and insert hcdrs
         for n, d_tuple in enumerate(df[["HCDR1", "HCDR2", "HCDR3","KD (nM)", "Binder"]].itertuples(index=False, name=None)):
-            print(f"-Construct-",d_tuple, sep="\n")
+            print(f"\n-Construct-",d_tuple, sep="\n")
             # insert CDRs
             data_conv, mask = insert_CDRs(cdrs=d_tuple[:3], chain_id=h_chain_index, positions=positions[0], lengths=positions[1], scaffold=data)
-            #print("---data_conv---",
-            #    *[f"{k}:{v.shape}" for k,v in data_conv.items()],
-            #    f"mask:{mask.shape}",
-            #    f"jnp.unique(data_conv['chain_index']):{jnp.unique(data_conv['chain_index'], return_counts=True)}",
-            #    sep="\n")
+            if verbose:
+                print("---data_conv---",
+                    *[f"{k}:{v.shape}" for k,v in data_conv.items()],
+                    f"mask:{mask.shape}",
+                    f"jnp.unique(data_conv['chain_index']):{jnp.unique(data_conv['chain_index'], return_counts=True)}",
+                    f"data_conv['residue_index']:{data_conv['residue_index']}",
+                    f"data_conv['chain_index']:{data_conv['chain_index']}",
+                    sep="\n")
+
             # predict structure with insert
             save = None
             if verbose:
@@ -391,12 +396,17 @@ def abscibind_pipe(data_dir:str|Path,
                     *[f"{k}:{v.shape}" for k,v in data_conv.items()],
                     f"is_target shape:{is_target.shape}",
                     f"is_target sum():{is_target.sum()}",
+                    f"jnp.unique(data_conv['chain_index']):{jnp.unique(data_conv['chain_index'], return_counts=True)}",
+                    f"data_conv['residue_index']:{data_conv['residue_index']}",
                     sep="\n")
+
             # calculate iptm
             iptm = abscibind(design=data_conv, is_target=is_target, save=save)
             if verbose:
                 print(f"iptm:", *[f"{k}:{v}"for k,v in iptm[abscibind.model[0]].items()], sep="\n")
+
             out_data.loc[len(out_data), :] = [scaffold_name, *[v for v in iptm[abscibind.model[0]].values()], *d_tuple]
             gc.collect()
+
     out_data.to_csv(data_dir/"ipTM_data.csv")
     return out_data

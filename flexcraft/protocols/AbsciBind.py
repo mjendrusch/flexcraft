@@ -10,6 +10,7 @@ from flexcraft.structure.af import (
     AFInput, AFResult, get_model_haiku_params, model_config, make_af2, make_predict)
 from flexcraft.structure.metrics import LRMSD, AbsciBindIPTM
 from flexcraft.data.data import DesignData
+from pathlib import Path
 
 class AbsciBind:
     '''
@@ -45,9 +46,10 @@ class AbsciBind:
             for model in self.model
         ]
         self.af2_config = model_config(self.model[0])
+        self.af2_config.model.global_config.use_dgram = False
         self.af2m = jax.jit(make_predict(make_af2(self.af2_config, use_multimer=self.use_multimer), num_recycle=self.num_recycle))
         self.iptm = AbsciBindIPTM()
-        
+
     def __call__(self, design:DesignData, is_target:jnp.ndarray, where:bool=True, save:Path|None=None):
         '''
         Calculate ipTM scores for the design.
@@ -69,7 +71,7 @@ class AbsciBind:
             else:
                 af_result: AFResult = self.af2m(params, self.key(), af_input)
             if save:
-                af_result.save_pdb(f"{save.withsuffix('')}_{model_name}.pdb")
+                af_result.save_pdb(f"{save.with_suffix('')}_{model_name}.pdb")
             scores[model_name] =  self.iptm(
                 result=af_result,
                 is_target=is_target

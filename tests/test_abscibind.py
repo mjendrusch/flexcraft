@@ -18,9 +18,9 @@ from abscibind import *
 def parse_args():
     p = argparse.ArgumentParser(description="Run AbsciBind ipTM scoring benchmark.")
     p.add_argument("--data_dir", type=Path, default=Path("data/o1_iptm_scoring"),
-                   help="Directory containing annotation.json, PDBs and CSVs.")
-    p.add_argument("--af_params", type=Path, required=True,
-                   help="Path to AlphaFold2 parameter directory.")
+                   help="Directory containing annotation.json, PDBs and CSVs (default: data/o1_iptm_scoring).")
+    p.add_argument("--af_params", type=Path, default=Path("params/af/params"),
+                   help="Path to AlphaFold2 parameter directory (default: params/af/params).")
     p.add_argument("--seed", type=int, default=0,
                    help="JAX PRNG seed.")
     p.add_argument("--targets", nargs="*", default=None,
@@ -31,6 +31,8 @@ def parse_args():
                    help="Download missing PDB/CSV files before running.")
     p.add_argument("--verbose", action="store_true",
                    help="Run in verbose mode. With continuous output and predicted structures as .pdb.")
+    p.add_argument("--af_model", type=str, default="model_2_multimer_v3",
+                   help="Name of the af model to use for inference (default: model_2_multimer_v3).")
     return p.parse_args()
 
 
@@ -47,7 +49,8 @@ def main():
         af2_key=key,
         targets=args.targets,
         max_designs=args.max_designs,
-        verbose=args.verbose
+        verbose=args.verbose,
+        model=args.af_model
     )
     print(out)
 
