@@ -33,6 +33,8 @@ def parse_args():
                    help="Run in verbose mode. With continuous output and predicted structures as .pdb.")
     p.add_argument("--af_model", type=str, default="model_2_multimer_v3",
                    help="Name of the af model to use for inference (default: model_2_multimer_v3).")
+    p.add_argument("--clip_ab", action="store_true",
+               help="Clip antibody variable regions to 120 aas.")
     return p.parse_args()
 
 
@@ -50,7 +52,8 @@ def main():
         targets=args.targets,
         max_designs=args.max_designs,
         verbose=args.verbose,
-        model=args.af_model
+        model=args.af_model,
+        clip_ab=args.clip_ab,
     )
     print(out)
 

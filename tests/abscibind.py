@@ -264,6 +264,7 @@ def abscibind_pipe(data_dir:str|Path,
     targets:str|list|None = None,
     max_designs:None|int = None,
     num_recycle=0,
+    clip_ab:bool=False,
     verbose:bool=False,
     **abscibind_kwargs):
     """Run abscibind on structures used to benchmark in origin1."""
@@ -337,18 +338,18 @@ def abscibind_pipe(data_dir:str|Path,
         mask[data["chain_index"]==l_chain_index] = True
         data = data[mask]
         
-
-        # clip ab chains :120 residues
-        index = jnp.arange(len(data["aa"]))
-        h_start = index[data["chain_index"]==h_chain_index][0]
-        h_stop = index[data["chain_index"]==h_chain_index][-1]
-        if (h_stop-h_start)>120:
-            data = data.index([slice(0,h_start+120,), slice(h_stop+1, -1)])
-        index = jnp.arange(len(data["aa"]))
-        l_start = index[data["chain_index"]==l_chain_index][0]
-        l_stop = index[data["chain_index"]==l_chain_index][-1]
-        if (l_stop-l_start)>120:
-            data = data.index([slice(0,l_start+120,), slice(l_stop+1, -1)])
+        if clip_ab:
+            # clip ab chains :120 residues
+            index = jnp.arange(len(data["aa"]))
+            h_start = index[data["chain_index"]==h_chain_index][0]
+            h_stop = index[data["chain_index"]==h_chain_index][-1]
+            if (h_stop-h_start)>120:
+                data = data.index([slice(0,h_start+120,), slice(h_stop+1, -1)])
+            index = jnp.arange(len(data["aa"]))
+            l_start = index[data["chain_index"]==l_chain_index][0]
+            l_stop = index[data["chain_index"]==l_chain_index][-1]
+            if (l_stop-l_start)>120:
+                data = data.index([slice(0,l_start+120,), slice(l_stop+1, -1)])
         if "clip-target" in scaffold_ann.keys():
             clip_start, clip_stop = scaffold_ann["clip-target"]
             index = jnp.arange(len(data["aa"]))
