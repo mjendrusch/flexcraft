@@ -29,6 +29,8 @@ def parse_args():
                    help="Maximum number of designs per scaffold (default: all).")
     p.add_argument("--fetch_data", action="store_true",
                    help="Download missing PDB/CSV files before running.")
+    p.add_argument("--verbose", action="store_true",
+                   help="Run in verbose mode. With continuous output and predicted structures as .pdb.")
     return p.parse_args()
 
 
@@ -45,6 +47,7 @@ def main():
         af2_key=key,
         targets=args.targets,
         max_designs=args.max_designs,
+        verbose=args.verbose
     )
     print(out)
 
