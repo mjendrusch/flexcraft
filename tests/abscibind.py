@@ -293,7 +293,8 @@ def abscibind_pipe(data_dir:str|Path,
             af_result.save_pdb(save)
         return af_result.to_data()
 
-    out_data = pd.DataFrame(columns=["scaffold", "ipTM","default_iptm", "ab_iptm", "HCDR1","HCDR2","HCDR3","KD (nM)","Binder"])
+    out_path = data_dir/"ipTM_data.csv"
+    out_data = pd.DataFrame(index = [0],columns=["scaffold", "ipTM","default_iptm", "ab_iptm", "HCDR1","HCDR2","HCDR3","KD (nM)","Binder"])
 
     for scaffold_name, scaffold_ann in annotations.items():
         print(f"\n---{scaffold_name}---\n")
@@ -405,8 +406,11 @@ def abscibind_pipe(data_dir:str|Path,
             if verbose:
                 print(f"iptm:", *[f"{k}:{v}"for k,v in iptm[abscibind.model[0]].items()], sep="\n")
 
-            out_data.loc[len(out_data), :] = [scaffold_name, *[v for v in iptm[abscibind.model[0]].values()], *d_tuple]
+            out_data.loc[0,:] = [scaffold_name, *[v for v in iptm[abscibind.model[0]].values()], *d_tuple]
+            out_data.to_csv(out_path,
+            mode="a" if out_path.exists() else "w",
+            header=~out_path.exists())
+            
             gc.collect()
 
-    out_data.to_csv(data_dir/"ipTM_data.csv")
     return out_data
