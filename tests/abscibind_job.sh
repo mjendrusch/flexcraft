@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=debug_abscibind
+#SBATCH --job-name=abscibind
 #SBATCH --partition=normal
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -7,10 +7,10 @@
 #SBATCH --mem=64gb
 #SBATCH --time=06:00:00
 #SBATCH --gres=gpu:full:1
-#SBATCH --output=logs/debug_abscibind_%j.out
-#SBATCH --error=logs/debug_abscibind_%j.err
+#SBATCH --output=logs/abscibind_%j.out
+#SBATCH --error=logs/abscibind_%j.err
 # ── User-defined paths ────────────────────────────────────────────────────────
-CONDA_ENV="flexcraft_2"           # e.g. flexcraft
+CONDA_ENV="flexcraft"           # e.g. flexcraft
 AF_PARAMS="params/af/params"       # e.g. /path/to/BinderDesign/params/af
 PROJECT_DIR="/home/hgf_dkfz/hgf_dsb0249/workspaces/haicwork/hgf_dsb0249-BinderDesign/flexcraft"   # absolute path on cluster
 # ──────────────────────────────────────────────────────────────────────────────
@@ -21,4 +21,4 @@ cd "$PROJECT_DIR"
 
 export CUDA_VISIBLE_DEVICES=0
 
-python tests/test_abscibind.py --af_params params/af/params/ --af_model "model_1_ptm" 
+python tests/test_abscibind.py --verbose --max_designs 20
