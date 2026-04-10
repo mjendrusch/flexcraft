@@ -220,9 +220,13 @@ def clean_chothia(file):
     out_path = Path(file.with_suffix("").__str__()+"_clean.pdb")
     with open(out_path, "w") as wf:
         with open(file, "r") as rf:
-            inp = rf.read()
-            outp = "\n".join([l[:26]+" "+l[27:] if l.startswith("ATOM") else l for l in inp.split("\n")])
-            wf.write(outp)
+            l = "init value"
+            while l:
+                l = rf.readline()
+                if l.startswith("ATOM"):
+                    wf.write(l[:26]+" "+l[27:])
+                elif not l.startswith("HETATM"):
+                    wf.write(l)
     return out_path
 
 def _clean_chothia(file:Path|str,

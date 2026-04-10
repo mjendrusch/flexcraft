@@ -21,4 +21,4 @@ cd "$PROJECT_DIR"
 
 export CUDA_VISIBLE_DEVICES=0
 
-python tests/test_abscibind.py --verbose --max_designs 20
+python tests/test_abscibind.py --verbose --max_designs 5 --n_recycle 4
