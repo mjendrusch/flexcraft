@@ -17,42 +17,34 @@ from abscibind import *
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run AbsciBind ipTM scoring benchmark.")
-    p.add_argument("--data_dir", type=Path, default=Path("data/o1_iptm_scoring"),
-                   help="Directory containing annotation.json, PDBs and CSVs (default: data/o1_iptm_scoring).")
+    p.add_argument("--ann_file", type=Path, default=Path("data/o1_iptm_scoring/fig13_ids.json"),
+                   help="Annotation file (*.json) (default: data/o1_iptm_scoring/fig13_ids.json).")
     p.add_argument("--af_params", type=Path, default=Path("params/af/params"),
                    help="Path to AlphaFold2 parameter directory (default: params/af/params).")
     p.add_argument("--seed", type=int, default=0,
                    help="JAX PRNG seed.")
     p.add_argument("--targets", nargs="*", default=None,
                    help="Subset of scaffold names to run (default: all).")
-    p.add_argument("--max_designs", type=int, default=None,
-                   help="Maximum number of designs per scaffold (default: all).")
-    p.add_argument("--n_recycle", type=int, default=0,
-                   help="Number of recycle steps in af (default: 0).")
-    p.add_argument("--fetch_data", action="store_true",
-                   help="Download missing PDB/CSV files before running.")
     p.add_argument("--verbose", action="store_true",
                    help="Run in verbose mode. With continuous output and predicted structures as .pdb.")
     p.add_argument("--af_model", type=str, default="model_2_multimer_v3",
                    help="Name of the af model to use for inference (default: model_2_multimer_v3).")
     p.add_argument("--clip_ab", action="store_true",
                help="Clip antibody variable regions to 120 aas.")
+    p.add_argument("--n_recycle", type=int, default=0,
+                   help="Number of recycle steps in af (default: 0).")
     return p.parse_args()
 
 
 def main():
     args = parse_args()
 
-    if args.fetch_data:
-        load_data(args.data_dir)
-
     key = Keygen(args.seed)
-    out = abscibind_pipe(
-        data_dir=args.data_dir,
+    out = predict_scaffold(
+        ann_file=args.ann_file,
         af_parameter_path=args.af_params,
         af2_key=key,
         targets=args.targets,
-        max_designs=args.max_designs,
         verbose=args.verbose,
         model=args.af_model,
         clip_ab=args.clip_ab,
