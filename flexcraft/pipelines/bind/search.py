@@ -104,7 +104,8 @@ af2_config.model.global_config.use_dgram = False
 af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
 #search = beam_search(salad_sampler, binder_fitness(pmpnn, transform, af2, af2_params, key))
 proposal = salad_proposal(config, salad_params, pmpnn, key, binder_step(config),
-                          out_steps=400, prev_threshold=opt.prev_threshold)
+                          out_steps=400, prev_threshold=opt.prev_threshold,
+                          timescale="ve(t, sigma_max=80.0)")
 fitness = genetic_binder_fitness(af2, af2_params, key)
 
 search = genetic_search(proposal, fitness, init=lambda x: x, steps=10)
@@ -131,11 +132,12 @@ while success_count < opt.num_designs:
     # successes, instances = search(
     #     salad_params, key, init_data, init_prev,
     #     log_to=f"{opt.out_path}/cycles/design_{attempt}")
-    successes, instances = search(init_data)
+    successes, instances = search(init_data, log_to=f"{opt.out_path}/cycles/design_{attempt}")
     for i, (score, success, data) in enumerate(instances):
         result: DesignData = data["prediction"]
         result.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_{i}.pdb")
         print(result.to_sequence_string().split(":")[-1], score, success)
     for i, (score, success, data) in enumerate(successes):
-        result.save_pdb(f"{opt.out_path}/success/design_{attempt}_{i}.pdb")
+        prediction: DesignData = data["prediction"]
+        prediction.save_pdb(f"{opt.out_path}/success/design_{attempt}_{i}.pdb")
     success_count += len(successes)
