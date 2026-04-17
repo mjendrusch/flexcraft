@@ -57,8 +57,14 @@ def forbid(amino_acids, aa_code):
 def tie_logits(logits, data):
     """Tie logits at multiple positions according to a tie_index and set of weights
     for each tied position."""
+    if "tie_index" not in data:
+        return logits
     tie_index = data["tie_index"]
-    tie_weights = data["tie_weights"]
+    if "tie_weights" in data:
+        tie_weights = data["tie_weights"]
+    else:
+        tie_weights = 1.0 / jnp.maximum(
+            1, jnp.zeros_like(tie_index).at[tie_index].add(1.0))[tie_index]
     logits = tie_weights[:, None] * logits
     # index-mean logits
     logit_sum = jnp.zeros_like(logits).at[tie_index].add(logits)

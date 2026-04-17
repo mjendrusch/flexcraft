@@ -22,6 +22,11 @@ dependencies = [
     "ColabDesign @ git+https://github.com/sokrypton/ColabDesign.git"
 ]
 
+[project.optional-dependencies]
+joltz = [
+    "joltz @ git+https://github.com/nboyd/joltz.git"
+]
+
 [project.urls]
 "Homepage" = "https://github.com/mjendrusch/flexcraft"
 "Bug reportes" = "https://github.com/mjendrusch/flexcraft/issues"

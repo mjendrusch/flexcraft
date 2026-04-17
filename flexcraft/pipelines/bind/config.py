@@ -1,0 +1,46 @@
+PARAM_PATHS = dict(
+    salad_params="params/salad/default_ve_scaled-200k.jax", 
+    pmpnn_params="params/pmpnn/v_48_030.pkl",
+    af2_params="params/af/",
+    alphaball_path="dependencies/DAlphaBall.gcc"
+)
+BINDER_OPT = dict(
+    scaffold="none", # TODO: make this work for Ab design
+    scaffold_relax_cutoff=-1.0,
+    hotspots="none",
+    coldspots="none",
+    num_aa=50,
+    radius=10.0,
+    coldspot_radius=15.0,
+    clash_radius=10.0,
+    min_center_distance=2.0,
+    clash_lr=5e-3,
+    compact_lr=1e-4,
+    contact_lr=1e-2,
+    l_bias=0.0,
+    h_bias=0.0,
+    e_bias=0.0,
+    relax_cutoff=3.0, # t threshold to allow target protein to move in final steps of denoising for interface refinement
+    fix_center_threshold=2.0,
+)
+DESIGN_OPT = dict(
+    num_designs=48,
+    num_sequences=10,
+    num_success=1,
+    salad_only="False",
+    centers_only="False",
+    prev_threshold=0.9,
+    use_cycler="False",
+    num_cycles=10, # how many iterations the af2_cycler should do
+    fix_template="False",
+    fix_all="False",
+    monomer_filter="False",
+    ipae_shortcut_threshold=0.35, # which ipae threshold to use for Rosetta relaxation
+    allow_target_mutations="0", # number of target interface residues allowed to be redesigned by ProteinMPNN. Set to 0 to leave target sequence as is. Can take a range for random sampling, e.g. "0-3"
+    redesign_radius=10.0, # target residue distance for redesign in Angstrom (if target mutations are allowed). 
+    write_cycles="True", # whether to save all af2cycler pdb files
+    write_failed="True", # whether to save pdb files of failed designs
+    write_attempts="True",
+    seed=37,
+    bindcraft_success_filter="default", # default is just bindcraft filter, can be expanded by adding filters to bindcraft_filter.py function
+)
