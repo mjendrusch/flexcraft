@@ -4,7 +4,7 @@ from pathlib import Path
 import json
 
 import flexcraft.sequence.aa_codes as aas
-from flexcraft.protocols.AbsciBind import AbsciBind
+from flexcraft.protocols.abscibind import AbsciBind
 from flexcraft.files.pdb import PDBFile
 from flexcraft.data.data import DesignData
 import pandas as pd
