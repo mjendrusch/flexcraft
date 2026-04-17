@@ -352,6 +352,8 @@ def abscibind_pipe(data_dir:str|Path,
     **abscibind_kwargs):
     """Run abscibind on structures used to benchmark in origin1."""
 
+    if verbose:
+        print("Targets: ",targets)
     if isinstance(targets, str):
         targets = [targets]
 
@@ -379,7 +381,7 @@ def abscibind_pipe(data_dir:str|Path,
 
     out_dir = data_dir/f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_af:{abscibind.model[0]}_clip:{clip_ab}_nrecycle:{num_recycle}"
     if not out_dir.exists():
-        out_dir.mkdir()
+        out_dir.mkdir(exist_ok=True)
     out_path = out_dir/"ipTM_data.csv"
     out_data = pd.DataFrame(index = [0],columns=["scaffold", "ipTM","default_iptm", "ab_iptm", "HCDR1","HCDR2","HCDR3","KD (nM)","Binder"])
 
