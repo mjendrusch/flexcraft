@@ -150,7 +150,8 @@ class AFInput:
                      pos_mask: Array | None = None,
                      aa: Array | None = None,
                      where: Array = True,
-                     template_sidechains: Array = False):
+                     template_sidechains: Array = False,
+                     mask_interchain: Array = False):
         """Add template information to an AFInput, using a DesignData object,
         or a set of coordinates `pos`, atom mask `pos_mask` and integer-encoded
         amino acid sequence `aa`.
@@ -205,6 +206,8 @@ class AFInput:
         result.pos_init = True
         result.data = copy(result.data)
         result.data.update(update)
+        if mask_interchain:
+            result.data["mask_template_interchain"] = mask_interchain
         return result
 
     def update_templates(self, data: Any) -> "AFInput":
@@ -453,7 +456,7 @@ class AFResult:
         pae = self.pae * 32
         if L is None:
             L = pae.shape[0]
-        d0 = 1.24 ** 3 * jnp.sqrt(L - 15) - 1.8
+        d0 = 1.24 * (L - 15) ** (1 / 3) - 1.8
         d0 = jnp.where(L < 27, 1, d0)
         return (1 / (1 + (pae / d0) ** 2))
     
@@ -465,7 +468,7 @@ class AFResult:
         bin_centers *= 32
         if L is None:
             L = logits.shape[0]
-        d0 = 1.24 ** 3 * jnp.sqrt(L - 15) - 1.8
+        d0 = 1.24 * (L - 15) ** (1 / 3) - 1.8
         d0 = jnp.where(L < 27, 1, d0)
         return (probabilities * (1 / (1 + (bin_centers / d0) ** 2))).sum(axis=-1)
 
@@ -516,7 +519,7 @@ class AFResult:
         other_chain = chain[:, None] != chain[None, :]
         mask *= other_chain
         L = mask.sum(axis=1)[:, None]
-        ptm = self.ptm_matrix(L)
+        ptm = mask * self.ptm_matrix(L)
         return ptm.mean(axis=1).max(axis=0)
 
     @property
