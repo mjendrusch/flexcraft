@@ -10,7 +10,7 @@ import numpy as np
 
 from salad.aflib.common.protein import Protein, to_pdb
 from salad.modules.utils.dssp import assign_dssp
-from salad.modules.utils.geometry import index_align
+from salad.modules.utils.geometry import index_align, positions_to_ncacocb
 from salad.aflib.model.all_atom_multimer import atom14_to_atom37, get_atom37_mask
 
 import flexcraft.sequence.aa_codes as aas
@@ -90,6 +90,23 @@ class DesignData:
         """Convert a dictionary into a DesignData object."""
         return DesignData(data=data)
 
+    def to_salad(self, augment_size=15) -> dict:
+        atom14 = self["atom_positions"]
+        ncacocb = positions_to_ncacocb(atom14)
+        converted_pos = jnp.concatenate((
+            ncacocb,
+            ncacocb[:, 1:2] + jnp.zeros((ncacocb.shape[0], augment_size, 3), dtype=jnp.float32)
+        ), axis=1)
+        return dict(
+            pos=converted_pos,
+            atom_pos=self["atom_positions"],
+            aatype=self["aa"],
+            residue_index=self.residue_index,
+            chain_index=self.chain_index,
+            batch_index=self.batch_index,
+            mask=self["mask"]
+        )
+
     def to_dict(self) -> dict:
         """Convert a DesignData object into a dictionary."""
         return self.data
@@ -98,6 +115,13 @@ class DesignData:
         """Copy a design data object to CPU."""
         return DesignData(
             data=tree.map_structure(np.array, self.data))
+
+    @property
+    def protein(self) -> "DesignData":
+        """The protein-only portion of a DesignData object."""
+        if "residue_type" in self.data:
+            return self[self.data["residue_type"] == 0]
+        return self
 
     @property
     def batch_index(self) -> Array:
@@ -169,6 +193,18 @@ class DesignData:
         elif "aa" in self.data:
             return jax.nn.one_hot(self.data["aa"], 20, axis=-1)
         return None
+
+    @property
+    def atom5(self) -> Array | None:
+        return positions_to_ncacocb(self["atom_positions"])
+
+    @property
+    def cb(self) -> Array:
+        return self.atom5[:, 4]
+
+    @property
+    def ca(self) -> Array:
+        return self.atom5[:, 1]
 
     def __getitem__(self, item_index):
         """Retrieve a field or slice from a DesignData object.
