@@ -27,6 +27,7 @@ from jax import numpy as jnp
 from jaxtyping import Array, Float, PyTree
 from joltz import TrunkState
 
+from salad.modules.utils.geometry import positions_to_ncacocb
 from flexcraft.data.data import DesignData
 from flexcraft.utils.rng import Keygen
 import flexcraft.sequence.aa_codes as aas
@@ -137,7 +138,6 @@ def substitute_aa(features, aa_one_hot):
     # zero out non-standard AA types
     zero_padded_sequence = jnp.pad(aa_one_hot, ((0, 0), (2, 11)))
     n_msa = features["msa"].shape[1]
-    print("n_msa", n_msa)
 
     # We assume there are no MSA hits for the binder sequence
     binder_profile = jnp.zeros_like(features["profile"][0, :binder_len])
@@ -211,13 +211,10 @@ def features_from_yaml(
 ) -> PyTree:
     if not isinstance(cache, Path):
         cache = Path(cache).expanduser()
-    print("Loading data")
     out_dir_handle = (
         TemporaryDirectory()
     )  # this is sketchy -- we have to remember not to let this get garbage collected
-    #os.makedirs("tmp/", exist_ok=True) # FIXME!!!!
     out_dir = Path(out_dir_handle.name)
-    #out_dir = Path("tmp/")
     # dump the yaml to a file
     input_data_path = out_dir / "input.yaml"
     input_data_path.write_text(input_yaml_str)
@@ -562,12 +559,18 @@ class Joltz2Writer:
 
 
 def atom_array_to_atomX(atom_array, atom_to_token, num_atoms=14):
-    atom_token_index = jnp.argmax(atom_to_token, axis=1)
     residue_atom_count = atom_to_token.sum(axis=0)
     atomx_index = jnp.repeat(jnp.arange(num_atoms)[None], atom_to_token.shape[1], axis=0)
     atomx_mask = atomx_index < residue_atom_count[:, None]
     atomx_conindex = jnp.cumsum(atomx_mask.reshape(-1), axis=0).reshape(*atomx_mask.shape) - 1
     return atom_array[atomx_conindex], atomx_mask
+
+def broadcast_array_to_atomX(residue_array, atom_to_token, num_atoms=14):
+    residue_atom_count = atom_to_token.sum(axis=0)
+    atomx_index = jnp.repeat(jnp.arange(num_atoms)[None], atom_to_token.shape[1], axis=0)
+    atomx_mask = atomx_index < residue_atom_count[:, None]
+    atomx = jnp.repeat(residue_array[:, None], num_atoms, axis=1)
+    return atomx, atomx_mask
 
 def atomX_to_atom_array(atomx, atom_to_token):
     consecutive_atoms = jnp.arange(atom_to_token.shape[0])
@@ -701,7 +704,11 @@ class JoltzResult(eqx.Module):
                 binder_selector = selector
             else:
                 binder_selector = binder_selector * (self.chain_index == source_chain)
-        contact_score = (entropy.sort(axis=1)[:, :num_contacts].mean(axis=-1) * binder_selector).sum()
+        # NOTE: Ensure that only valid entries are averaged
+        sorted_entropy = entropy.sort(axis=1)[:, :num_contacts]
+        is_valid_entropy = sorted_entropy < 1e5
+        mean_entropy = (sorted_entropy * is_valid_entropy).sum(axis=-1) / jnp.maximum(1, is_valid_entropy.sum(axis=-1))
+        contact_score = (mean_entropy * binder_selector).sum()
         contact_score /= jnp.maximum(1, binder_selector.sum())
         return contact_score
 
@@ -762,23 +769,45 @@ class JoltzResult(eqx.Module):
             sample24 = jnp.moveaxis(sample24, -1, 0)
         return sample24, mask24
 
+    # TODO
+    def _broadcast_sampled(self, sampled_property, num_atoms=24):
+        if self.is_single_sample:
+            sampled_property = sampled_property[0]
+        else:
+            sampled_property = sampled_property[:, 0]
+            sampled_property = jnp.moveaxis(sampled_property, 0, -1)
+        sample24, mask24 = broadcast_array_to_atomX(
+            sampled_property, self.atom_to_token, num_atoms=num_atoms)
+        if not self.is_single_sample:
+            sample24 = jnp.moveaxis(sample24, -1, 0)
+        return sample24, mask24
+
     @property
     def is_single_sample(self):
         return len(self.data["samples"].shape) == 3
 
     @property
     def plddt_logits(self):
-        plddt24, mask24 = self._transform_sampled(self.data["confidence"].plddt_logits, num_atoms=24)
-        return plddt24, mask24
+        plddt_logits = self.data["confidence"].plddt_logits
+        if self.is_single_sample:
+            plddt_logits = plddt_logits[0]
+        else:
+            plddt_logits = plddt_logits[:, 0]
+        return plddt_logits
+        #plddt24, mask24 = self._transform_sampled(self.data["confidence"].plddt_logits, num_atoms=24)
+        #return plddt24, mask24
 
     @property
     def plddt(self):
-        print("IS SINGLE SAMPLE", self.data["samples"].shape, self.is_single_sample)
-        print("PLDDT SHAPE", self.data["confidence"].plddt.shape, self.data["confidence"].plddt_logits.shape)
-        plddt24, mask24 = self._transform_sampled(self.data["confidence"].plddt, num_atoms=24)
-        print("PLDDT24 SHAPE", plddt24.shape, mask24.shape)
-        plddt = (plddt24 * mask24).sum(axis=-1) / jnp.maximum(1, mask24.sum(axis=-1))
+        plddt = self.data["confidence"].plddt
+        if self.is_single_sample:
+            plddt = plddt[0]
+        else:
+            plddt = plddt[:, 0]
         return plddt
+        # plddt24, mask24 = self._transform_sampled(self.data["confidence"].plddt, num_atoms=24)
+        # plddt = (plddt24 * mask24).sum(axis=-1) / jnp.maximum(1, mask24.sum(axis=-1))
+        # return plddt
     
     @property
     def pae_logits(self):
@@ -788,7 +817,6 @@ class JoltzResult(eqx.Module):
     
     @property
     def pae(self):
-        print("PAE SHAPE", self.data["confidence"].pae.shape)
         if self.is_single_sample:
             return jnp.fill_diagonal(self.data["confidence"].pae[0], 0.0, inplace=False) / 32
         return jax.vmap(lambda x: jnp.fill_diagonal(x, 0.0, inplace=False))(self.data["confidence"].pae[:, 0]) / 32
@@ -899,7 +927,6 @@ class JoltzResult(eqx.Module):
             atom24, mask24 = self.atom24_samples
         else:
             atom24, mask24 = self.atom24
-        print("ATOM24 SHAPE", atom24.shape, mask24.shape)
         return DesignData(data=dict(
             atom_positions=atom24,
             atom_mask=mask24,
@@ -920,8 +947,13 @@ class JoltzPrediction:
         return JoltzResult(data=self.data)
 
     def save_pdb(self, path, sample_index=0):
-        self.writer.save_pdb(path, self.data["samples"][sample_index][None],
-                             plddt=self.data["confidence"].plddt[sample_index][None])
+        is_multisample = len(self.data["samples"].shape) == 4
+        if is_multisample:
+            self.writer.save_pdb(path, self.data["samples"][sample_index],
+                                 plddt=self.data["confidence"].plddt[sample_index])
+        else:
+            self.writer.save_pdb(path, self.data["samples"],
+                                 plddt=self.data["confidence"].plddt)
 
     def save_cif(self, path, sample_index=0):
         self.writer.save_cif(path, self.data["samples"][sample_index][None],
@@ -1072,15 +1104,10 @@ if __name__ == "__main__":
     key = Keygen(42)
     joltz, params, writer = model.evaluator(dict(kind="protein", sequence="X" * 100), dict(ccd="TOP"), dict(kind="dna", sequence="GGCGCAATAAGCGCC"))
     joltz_pred = model.predictor(dict(ccd="TOP"), dict(kind="dna", sequence="GGCGCAATAAGCGCC"))
-    # joltz_eval, _, writer_eval = model.evaluator(dict(kind="protein",
-    #     sequence="MIVKQRKINLKPATATITDPLEVNFAEALVESVKNNAPVKVNGMTVYGKGGNFEITRNGPNQLTVKAWGDIEIKIEAKLQPGYDAAQGFLDRIEAGSNRQ"), dict(ccd="TOP"))
-    # joltz_eval = jax.jit(lambda p, k, d: joltz_eval(params).predict(k, d))
     x = jax.random.gumbel(key(), (100, 20), dtype=jnp.float32)
     x = jnp.array(x)
     x = jax.nn.log_softmax(x, axis=-1)
-    # x = jax.nn.one_hot(aas.encode(
-    #     "MIVKQRKINLKPATATITDPLEVNFAEALVESVKNNAPVKVNGMTVYGKGGNFEITRNGPNQLTVKAWGDIEIKIEAKLQPGYDAAQGFLDRIEAGSNRQ", aas.AF2_CODE),
-    #     num_classes=20)
+
     pred_1 = joltz_pred(key(), dict(kind="protein", sequence="MIVKQRKINLKPATATITDPLEVNFAEALVESVKNNAPVKVNGMTVYGKGGNFEITRNGPNQLTVKAWGDIEIKIEAKLQPGYDAAQGFLDRIEAGSNRQ"))
     pred_1.save_pdb("test_pdb_1.pdb")
     pred_2 = joltz_pred(key(), dict(kind="protein", sequence="MIVKQRKIAAAPATATITDPLEVNFAEALVESVKNNAPVAAAAMTVYGKGGNFEITRNGPNQLTVKAWGDIEIKIEAKLQPGYDAAQGFLDRIEAGSNRQ"))
@@ -1094,10 +1121,9 @@ if __name__ == "__main__":
         loss = result.contact_score().mean() + 0.25 * plddt_loss
         return loss, result
     loss_update = jax.jit(jax.value_and_grad(loss, argnums=0, has_aux=True))
-    #joltz_result = joltz_eval(params, key(), xx) # FIXME THIS IS NOT IT, needs direct prediction
     for i in range(100):
         print(f"starting {i}")
-        scale = 1.0 #1 / (1 - i / 100)
+        scale = 1.0
         (loss, result), grad = loss_update(x, jnp.array(scale), key=key(), params=params)
         print(i, loss)
         grad /= jnp.linalg.norm(grad)
@@ -1108,23 +1134,10 @@ if __name__ == "__main__":
                             sequence=aas.decode(jnp.argmax(x, axis=1), aas.AF2_CODE)),
                 aa=jax.nn.softmax(x, axis=-1))
             pred.save_cif(f"result_{i}.cif")
-        # writer.save_cif(f"result_{i}.cif", result.data["samples"][0],
-        #                 result.data["confidence"].plddt[0])
         print(f"done {i}")
-        # print(result["samples"])
     np.savez_compressed(f"joltz_prediction_{i}.npz", samples=result.data["samples"], dist=result.data["distogram"],
                         plddt_logits=result.data["confidence"].plddt_logits, pae_logits=result.data["confidence"].pae_logits,
                         pde_logits=result.data["confidence"].pde_logits,
                         **result.data["features"])
     print(result.plddt.mean())
-        # print(result)
-    # feat = make_features([dict(kind="protein", sequence="X" * 100), dict(ccd="TOP")])
-    # np.savez_compressed("joltz_features.npz", **{k: np.array(v) for k, v in feat.items()})
-    # jax_features = {k: np.array(v) for k, v in feat.items() if k != "record"}
 
-    # # We're also compatible with the JIT
-    # jit_joltz = eqx.filter_jit(model)
-
-    # # Now we can finally make a prediction
-    # prediction = jit_joltz(jax_features, key = jax.random.key(0), num_sampling_steps=25, recycling_steps=3, deterministic=False)
-    # np.savez_compressed("joltz_prediction.npz", a=prediction[0], b=prediction[1])
