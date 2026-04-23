@@ -25,8 +25,8 @@ from flexcraft.data.data import DesignData
 @chex.dataclass(mappable_dataclass=False)
 class AFInput:
     """AlphaFold 2 input dataclass."""
-    prev_init: bool = False
-    pos_init: bool = False
+    prev_init: bool = False # wether data is recycled
+    pos_init: bool = False # wether atom-positions are initialized
     data: dict = None
     def __getitem__(self, name):
         return self.data[name]
@@ -45,7 +45,7 @@ class AFInput:
         return self.data.items()
     @staticmethod
     def from_data(data: Any) -> "AFInput":
-        """Convert a dictionary or DesignData object to AFInput."""
+        """Convert a dictionary or DesignData object to AFInput (lossless)."""
         return AFInput(
             prev_init=False,
             pos_init=False,
@@ -53,6 +53,7 @@ class AFInput:
 
     @staticmethod
     def from_sequence(sequence: Any) -> "AFInput":
+        '''Initialize AFInput object from one-hot encoded amino-acid-sequence.'''
         return AFInput(
             prev_init=False,
             pos_init=False,
@@ -61,12 +62,25 @@ class AFInput:
 
     @staticmethod
     def from_chains(*chains) -> "AFInput":
+        '''
+        Initialize AFInput from multiple chains.
+
+        Args:
+            *chains: iterable of dict-like containing:
+                "kind": kind of chain (only "protein" supported)
+                and at least one of:
+                "sequence": list of str, encoding amino-acids
+                "length" : int, length of protein without aa-identity specification
+        
+        Notes:
+            - The chains are first encoded as DesignData and the converted to AFInput.
+        '''
         chain_info = []
         for chain in chains:
             kind = chain["kind"]
             if chain["kind"] != "protein":
                 raise NotImplementedError(
-                    f"AF2 can only handle protein chains, '{kind}' is not supported.")
+                    f"AF2 can only handle protein chains, chain['kind']=='{kind}' is not supported.")
             if "sequence" in chain:
                 chain_info.append(DesignData.from_sequence(chain["sequence"]))
             elif "length" in chain:
@@ -80,7 +94,7 @@ class AFInput:
     def add_guess(self,
                   data: DesignData | None = None,
                   pos: Array | None = None) -> "AFInput":
-        """Add initial guess information to an AFInput using a
+        """Add initial guess information as "prev" key to an AFInput using a
         DesignData object `data` or coordinate array `pos`."""
         if data is not None:
             positions = data["atom_positions"]
@@ -88,6 +102,7 @@ class AFInput:
             positions = pos
         result = copy(self)
         result.prev_init = True
+        # convert to af2 format
         atom_positions = atom14_to_atom37(
             positions, self.data["aatype"])
         result.data = copy(result.data)
@@ -141,6 +156,15 @@ class AFInput:
         or a set of coordinates `pos`, atom mask `pos_mask` and integer-encoded
         amino acid sequence `aa`.
         `where` limits the template to a subset of residues defined by a boolean mask.
+
+        Returns:
+            Result: Copy of self with added templates.
+
+        Notes:
+            - Templates are saved under 'template_*' keys.
+            - add_templates can be called multiple times.
+            - Templates after the first are concatenated in the last axis.
+            - The original DesignData is also modified in the process, but not fully.
         """
         where = jnp.array(where, dtype=jnp.bool_)
         template_sidechains = jnp.array(template_sidechains, dtype=jnp.bool_)
@@ -187,6 +211,7 @@ class AFInput:
         return result
 
     def update_templates(self, data: Any) -> "AFInput":
+        '''Replace templates feature of existing AFInput with data.'''
         result = AFInput(
             prev_init=self.prev_init, pos_init=self.pos_init,
             data={k: v for k, v in self.data.items()})
@@ -194,7 +219,12 @@ class AFInput:
         return result
 
     def update_sequence(self, sequence: Array) -> "AFInput":
-        """Modify the underlying sequence of an AFInput to `sequence`."""
+        """
+        Modify the underlying sequence of an AFInput to `sequence`.
+
+        Args:
+            sequence: array of ints, either one-hot or int encoding of amino-acids
+        """
         # result = AFInput(
         #     prev_init=self.prev_init, pos_init=self.pos_init,
         #     data={k: v for k, v in self.data.items()})
@@ -206,6 +236,7 @@ class AFInput:
         return result
 
     def to_data(self) -> Any:
+        raise NotImplementedError("This function is not implemented, yet!")
         return ... # TODO
 
 def _init_template(data):
@@ -354,8 +385,9 @@ def _chain_residue_index(residue_index, chain_index):
 @chex.dataclass(mappable_dataclass=False)
 class AFResult:
     """AlphaFold result dataclass."""
-    inputs: dict = None
-    result: dict = None
+    inputs: dict = None # AFInput data
+    result: dict = None # raw AF2 output
+
     def _mean_of_binned(self, name, has_edges=True) -> jnp.ndarray:
         logits = self.result[name]["logits"]
         if has_edges:

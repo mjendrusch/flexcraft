@@ -33,6 +33,7 @@ import flexcraft.sequence.aa_codes as aas
 
 
 def load_boltz2(model="boltz2_conf.ckpt", cache=Path("./params/boltz/")):
+    '''Load a PyTorch instance of Boltz-2 in eval mode.'''
     if isinstance(cache, str):
         cache = Path(cache)
     if not cache.exists():
@@ -68,6 +69,7 @@ def load_boltz2(model="boltz2_conf.ckpt", cache=Path("./params/boltz/")):
 
 def chain_yaml(chain_name: str, sequence: str = None, ccd: str = None,
                smiles: str = None, kind: str = "protein", use_msa: bool = False) -> str:
+    '''Format chains as yml for conversion to PyTree.'''
     if ccd is not None:
         kind = "ligand"
         result = f"""  - ligand:
@@ -95,6 +97,14 @@ def _prefix():
 sequences:"""
 
 def make_features(raw_chains: list, cache="./params/boltz"):
+    '''
+    Prepare DesignData objects for input to Joltz2Evaluator.
+    Args:
+        raw_chains: List[DesignData|dict], either DesignData object or dict containing sequence and kwargs.
+        cache: str|Path: ("./params/boltz") cache path
+    Returns:
+        (features, writer_spec): Tuple[dict]
+    '''
     chains = []
     for c in raw_chains:
         if isinstance(c, DesignData):
@@ -126,6 +136,14 @@ def make_features(raw_chains: list, cache="./params/boltz"):
     return features, writer_spec
 
 def substitute_aa(features, aa_one_hot):
+    '''
+    Prepare features and aa one-hot encoding for Boltz2 prediction via Joltz2Evaluator._predict.
+    Args:
+        features: dict, feature representation of input chains, as formated by make features
+        aa_one_hot: jnp.ndarray, one-hot encoded input sequence
+    Returns:
+        features: dict
+    '''
     features["res_type"] = jnp.array(features["res_type"]).astype(jnp.float32)
     features["msa"] = jnp.array(features["msa"]).astype(jnp.float32)
     features["profile"] = jnp.array(features["profile"]).astype(jnp.float32)
@@ -209,6 +227,14 @@ def features_from_yaml(
     input_yaml_str: str,
     cache=Path("./params/boltz/").expanduser(),
 ) -> PyTree:
+    '''
+    Create PyTree for representing input features from a yaml string.
+    Args:
+        input_yaml_str: str, features in yml formated, as produced by chain_yml
+        cache: Path ("./params/boltz/"), cache path for ccd.pkl and mols
+    Returns:
+        (features, writer_spec): Tuple[dict]
+    '''
     if not isinstance(cache, Path):
         cache = Path(cache).expanduser()
     print("Loading data")
@@ -297,12 +323,32 @@ def features_from_yaml(
     return features, writer_spec
 
 class Joltz2:
+    '''
+    High level class for jax adapted Boltz-2.
+    Methods:
+        evaluator: creates a function for generating de-novo structures
+        predictor_adhoc: 
+        predictor: 
+    '''
     def __init__(self, model="boltz2_conf.ckpt", cache="./params/boltz/"):
         self.cache = cache
         self.model = load_boltz2(model=model, cache=cache)
         self.model_jit = jax.jit(self.model)
 
     def evaluator(self, *chains, num_recycle=2, num_sampling_steps=25, deterministic=False):
+        '''
+        Create an instance of Joltz2Evaluator for protein-structure hallucinations from amino-acid sequences.
+        Args:
+            chains: Tuple[dict[str,str]], dictionaries containing at least "kind" ("protein") and sequence and optionally arguments such as use_mse
+            num_recycle: int
+            num_sampling_steps: int
+            deterministic: bool
+        Returns:
+            (evaluator, evaluator_params, Joltz2Writer)
+        \nNotes:
+            \nMask unknown aa positions in the "sequence" key as "X"
+            \nPredicts without side-chains
+        '''
         features, writer_spec = make_features(chains, cache=self.cache)
         # move to jax
         features = jax.tree.map(jnp.array, features)
@@ -319,12 +365,21 @@ class Joltz2:
 
     def predictor_adhoc(self, num_recycle=2, num_samples=1,
                         num_sampling_steps=25, deterministic=False):
+        '''
+        Create a generator for predicting structures ad-hoc.
+        '''
         jit_predict = eqx.filter_jit(Joltz2Evaluator(
             joltz=self.model, features=None,
             num_recycle=num_recycle,
             num_sampling_steps=num_sampling_steps,
             deterministic=deterministic)._predict)
         def _predict(key, *chains, aa=None):
+            '''
+            Predict a structure for the input chains.
+            Args:
+                *chains: List[dict], containing "sequence"
+                aa: deprecated!
+            '''
             features, writer_spec = make_features(chains, cache=self.cache)
             features = pad_boltz_atom_features_for_compilation(features)
             writer_features = {
@@ -341,12 +396,22 @@ class Joltz2:
 
     def predictor(self, *context_chains, num_recycle=2, num_samples=1,
                   num_sampling_steps=25, deterministic=False):
+        '''
+        Create a generator for predicting structures with cached context chains.
+        Args:
+            *context_chains: List[dict], dicts containing "sequence", "kind", etc.
+            ...
+            ...
+        '''
         jit_predict = eqx.filter_jit(Joltz2Evaluator(
             joltz=self.model, features=None,
             num_recycle=num_recycle,
             num_sampling_steps=num_sampling_steps,
             deterministic=deterministic)._predict)
         def _predict(key, *chains, aa=None):
+            '''
+            Predict the structure of the chains with cached context chains.
+            '''
             features, writer_spec = make_features(chains + context_chains, cache=self.cache)
             features = pad_boltz_atom_features_for_compilation(features)
             if aa is not None:
@@ -508,7 +573,12 @@ class Joltz2Writer:
     record: any
     out_dir: str
     temp_dir_handle: TemporaryDirectory
-
+    '''
+    Class for saving structures from Joltz2. Wraps _BoltzWriter.
+    Methods:
+        save_pdb
+        save_cif
+    '''
     def __init__(
         self,
         *,
@@ -632,6 +702,9 @@ def get_contact_atom(atom24, mol_type):
     return protein + dna + rna + smolecule
 
 class JoltzResult(eqx.Module):
+    '''
+    Class for handling Joltz2 prediction results. Provides access to scoring.
+    '''
     data: dict
 
     @property
@@ -913,10 +986,17 @@ class JoltzResult(eqx.Module):
 
 @dataclass
 class JoltzPrediction:
+    '''
+    Class for Joltz2 output.
+    Attributes:
+        data: prediction data from Joltz2
+        writer: Joltz2Writer for saving structures
+    '''
     data: Any
     writer: Joltz2Writer
     @property
     def result(self):
+        '''Convert to JoltzResult'''
         return JoltzResult(data=self.data)
 
     def save_pdb(self, path, sample_index=0):
@@ -933,7 +1013,9 @@ class Joltz2Evaluator(eqx.Module):
     num_recycle: int = 3
     num_sampling_steps: int = 25
     deterministic: bool = False
-
+    '''
+    Core Class adapting Boltz2 to jax.
+    '''
     def substitute_aa(self, sequence):
         self.features = substitute_aa(
             self.features, aa_one_hot=sequence)

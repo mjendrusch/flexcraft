@@ -38,6 +38,13 @@ from flexcraft.data.data import DesignData
 import flexcraft.sequence.aa_codes as aas
 
 def score_interface(pdb_file: PDBFile | str, is_target):
+    '''
+    Scores binder interface quality by Rosetta's InterfaceAnalyzer.
+    Multi-chain targets/binders are treated as single-chain.
+    Args.:
+        pdb_file: the file containing a relaxed binder and target
+        is_target: a boolean array specifiying which aas are target/binder
+    '''
     # load pose
     if isinstance(pdb_file, str):
         pdb_file = PDBFile(path=str)

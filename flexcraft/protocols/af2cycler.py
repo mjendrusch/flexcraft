@@ -54,6 +54,7 @@ def af_cycler(af_model, mpnn_model, confidence=None, fix_template=False, fix_all
         # update_sequence
         start_aa = jax.nn.one_hot(af_input["aatype"], 20, axis=-1)
         noise = jax.random.gumbel(key(), logits.shape)
+        # scale MPNN prediction and noise with AF predicted confidence
         update = alpha[:, None] * logits + (1 - alpha)[:, None] * noise
         new_aa = jnp.argmax(start_aa + update, axis=-1)
         # results
@@ -68,8 +69,10 @@ def af_cycler(af_model, mpnn_model, confidence=None, fix_template=False, fix_all
 def contact_confidence(af_result: AFResult):
     p_contact = af_result.contact_probability()
     resi = af_result.inputs["residue_index"]
+    # calculate euclidean distance between indexes
     distance = abs(resi[:, None] - resi[None, :])
     pair_mask = distance > 9
+    # set residue interaction probabilities that are <9 aas apart in primary structure to 0
     p_contact = jnp.where(pair_mask, p_contact, 0.0)
     score = jnp.sort(p_contact, axis=1)[:, -2:].mean(axis=1)
     return score

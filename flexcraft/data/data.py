@@ -48,6 +48,23 @@ class Block:
 
 @chex.dataclass(mappable_dataclass=False)
 class DesignData:
+    """
+    Core data class in flexcraft.
+    Stores data arrays as key-value pair.
+    Supports dict-like indexing and slicing of arrays.
+    Supported keys/data-arrays for a protein of length *L* are:
+    aa: amino-acid sequence (L,)
+    atom_positions: atom14 notation in 3D space (L,14,3)
+    atom_mask: atom14 notation (L,14)
+    residue_index: residue numbering (L,)
+    chain_index: chain numbering (L,)
+    batch_index: batch numbering (L,)
+    tie_index: symmetry ties for PMPNN (L,)
+    tie_weights: weights for tied PMPNN design (L,)
+    mask: mask (L,)
+    Additional keys can be added.
+    All arrays must have the same length!
+    """
     data: dict
     @classmethod
     def from_blocks(cls, blocks: List[Block]) -> "DesignData":
@@ -55,7 +72,7 @@ class DesignData:
         return DesignData(data=data)
 
     @classmethod
-    def from_length(cls, length):
+    def from_length(cls, length:int):
         """Initialize an empty DesignData object for a given protein length.
         
         Args:
@@ -78,6 +95,8 @@ class DesignData:
     
     @classmethod
     def from_sequence(cls, sequence):
+        '''Initialize DesignData class from string.
+        Multi-chain sequences are delimited by ":".'''
         result = []
         for subseq in sequence.split(":"):
             subchain = DesignData.from_length(len(subseq))
@@ -439,7 +458,7 @@ def concatenate_dict(items: List[dict], axis=0, drop_non_common=True) -> dict:
     Args:
         items: list of dictionaries of arrays.
         axis: axis along which to concatenate arrays for each key.
-
+        drop_non_common: bool, if True, values not in all items are dropped. 
     Returns:
         Dictionary containing concatenated arrays for each key in the
         list of input dictionaries.
