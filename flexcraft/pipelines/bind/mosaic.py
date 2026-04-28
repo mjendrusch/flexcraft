@@ -27,6 +27,7 @@ opt = parse_options(
     "predict structures with AlphaFold",
     pmpnn_path="params/solmpnn/v_48_030.pkl",
     target_path="target.pdb",
+    target_sequence="none",
     target_chains="all",
     out_path="out",
     center="False",
@@ -49,13 +50,16 @@ params = dict(
     mpnn=pmpnn_params
 )
 # retrieve target
-target = load_pdb(opt.target_path)
-if opt.target_chains != "all":
-    selected_chains = np.array([
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(c) 
-        for c in opt.target_chains], dtype=np.int32)
-    target = target[(target.chain_index[:, None] == selected_chains).any(axis=-1)]
-target_sequence = target.to_sequence_string()
+if opt.target_sequence != "none":
+    target_sequence = opt.target_sequence
+else:
+    target = load_pdb(opt.target_path)
+    if opt.target_chains != "all":
+        selected_chains = np.array([
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(c)
+            for c in opt.target_chains], dtype=np.int32)
+        target = target[(target.chain_index[:, None] == selected_chains).any(axis=-1)]
+    target_sequence = target.to_sequence_string()
 # set up Boltz models
 model = Joltz2()
 # unknown-aa hallucination model

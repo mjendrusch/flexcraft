@@ -1,6 +1,6 @@
-# adapted from mosaic (TODO: include license)
+# adapted from mosaic ((c) 2025 escalante under MIT license)
 import shutil
-from typing import Any, Literal
+from typing import Any, Literal, List
 import os
 from pathlib import Path
 from functools import cached_property
@@ -67,8 +67,13 @@ def load_boltz2(model="boltz2_conf.ckpt", cache=Path("./params/boltz/")):
     _model_params, _model_static = eqx.partition(model, eqx.is_inexact_array)
     return eqx.combine(jax.device_put(_model_params), _model_static)
 
-def chain_yaml(chain_name: str, sequence: str = None, ccd: str = None,
-               smiles: str = None, kind: str = "protein", use_msa: bool = False) -> str:
+def chain_yaml(chain_order: List[str], num_repeats: int = None, sequence: str = None,
+               ccd: str = None, smiles: str = None, kind: str = "protein", use_msa: bool = False,
+               **kwargs) -> str:
+    if num_repeats is None:
+        num_repeats = 1
+    chain_names = [chain_order.pop(0) for i in range(num_repeats)]
+    chain_name = ", ".join(chain_names)
     if ccd is not None:
         kind = "ligand"
         result = f"""  - ligand:
@@ -96,6 +101,7 @@ def _prefix():
 sequences:"""
 
 def make_features(raw_chains: list, cache="./params/boltz"):
+    chain_order = [c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
     chains = []
     for c in raw_chains:
         if isinstance(c, DesignData):
@@ -111,8 +117,8 @@ def make_features(raw_chains: list, cache="./params/boltz"):
     yaml = "\n".join(
         [_prefix()]
         + [
-            chain_yaml(chain_id, **c)
-            for chain_id, c in zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", chains)
+            chain_yaml(chain_order, **c)
+            for c in chains
         ]
     )
 
@@ -120,10 +126,14 @@ def make_features(raw_chains: list, cache="./params/boltz"):
     # tf, template_yaml = build_template_yaml("ABCDEFGHIJKLMNOPQRSTUVWXYZ", chains)
     # if tf is not None:
     #     yaml += template_yaml
+    chain_order = [c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
+    has_template, template_yaml = build_chain_template_yaml(chain_order, chains)
+    if has_template:
+        yaml += template_yaml
 
     features, writer_spec = features_from_yaml(yaml, cache=cache)
-    # if tf is not None: # make sure we actually got a template
-    #     assert np.sum(features["template_mask"]) > 0
+    if has_template: # make sure we actually got a template
+        assert np.sum(features["template_mask"]) > 0
     return features, writer_spec
 
 def substitute_aa(features, aa_one_hot):
@@ -152,8 +162,30 @@ def substitute_aa(features, aa_one_hot):
         "profile": features["profile"].at[0, :binder_len].set(binder_profile),
     }
 
+def build_chain_template_yaml(chain_order: List[str], chains: list):
+    num_templates = 0
+    template_yaml = """
+        
+templates:"""
+    for chain in chains:
+        chain: dict
+        num_repeats = chain.get("num_repeats", 1)
+        if not "template_file" in chain:
+            for i in range(num_repeats):
+                chain_order.pop(0)
+            continue
+        if chain["template_file"] is None or not os.path.isfile(chain["template_file"]):
+            for i in range(num_repeats):
+                chain_order.pop(0)
+            continue
+        num_templates += 1
+        template_yaml += f"""
+  - cif: {chain['template_file']}
+    chain_id: [{', '.join([chain_order.pop(0) for i in range(num_repeats)])}]
+"""
+    return num_templates, template_yaml
 
-# TODO templates
+
 # def build_template_yaml(chain_names: str, chains: list):
 #     # boltz wants perfect .cifs :( 
 #     templates = {
@@ -639,7 +671,7 @@ class JoltzResult(eqx.Module):
 
     @property
     def log_distogram(self):
-        logits = self.data["distogram"][0]
+        logits = self.data["distogram"]
         return jax.nn.log_softmax(logits, axis=-1)
 
     @property
@@ -692,18 +724,22 @@ class JoltzResult(eqx.Module):
 
     def chain_contact_score(self, target_chain, source_chain=0, contact_distance=14.0,
                             min_resi_distance=10, num_contacts=25):
+        if isinstance(target_chain, int):
+            target_chain = [target_chain]
+        target_chain = jnp.array(target_chain, dtype=jnp.int32)
         entropy = self.contact_entropy(contact_distance=contact_distance)
         resi_dist = abs(self.residue_index[:, None] - self.residue_index[None, :])
         other_chain = self.chain_index[:, None] != self.chain_index[None, :]
         entropy = jnp.where((resi_dist >= min_resi_distance) + other_chain > 0, entropy, 1e6)
-        selector = self.chain_index == target_chain
+        selector = (self.chain_index[:, None] == target_chain).any(axis=1)
         entropy = jnp.where(selector[None, :], entropy, 1e6)
-        binder_selector = ~selector
-        if source_chain is not None:
-            if target_chain == source_chain:
-                binder_selector = selector
-            else:
-                binder_selector = binder_selector * (self.chain_index == source_chain)
+        if source_chain is None:
+            binder_selector = ~selector
+        else:
+            if isinstance(source_chain, int):
+                source_chain = [source_chain]
+            source_chain = jnp.array(source_chain, dtype=jnp.int32)
+            binder_selector = (self.chain_index[:, None] == source_chain).any(axis=1)
         # NOTE: Ensure that only valid entries are averaged
         sorted_entropy = entropy.sort(axis=1)[:, :num_contacts]
         is_valid_entropy = sorted_entropy < 1e5
@@ -750,12 +786,12 @@ class JoltzResult(eqx.Module):
     @property
     def cb_samples(self):
         atom24, mask24 = self.atom24_samples
-        return jax.vmap(get_contact_atom, (0, None), 0)(atom24, self.data["mol_type"])
+        return jax.vmap(get_contact_atom, (0, None), 0)(atom24, self.data["features"]["mol_type"][0])
 
     @property
     def cb(self):
         atom24, mask24 = self.atom24
-        return get_contact_atom(atom24, self.data["mol_type"])
+        return get_contact_atom(atom24, self.data["features"]["mol_type"][0])
 
     def _transform_sampled(self, sampled_property, num_atoms=24):
         if self.is_single_sample:
@@ -848,10 +884,11 @@ class JoltzResult(eqx.Module):
 
     @property
     def iptm(self):
-        ptm = self.ptm_matrix() # FIXME: adjust L?
-        chain = self.chain_index
-        other_chain = chain[:, None] != chain[None, :]
-        return ((ptm * other_chain).sum(-1) / jnp.maximum(1, other_chain.sum(-1))).max()
+        return self.index_iptm(self.chain_index)
+        # ptm = self.ptm_matrix() # FIXME: adjust L?
+        # chain = self.chain_index
+        # other_chain = chain[:, None] != chain[None, :]
+        # return ((ptm * other_chain).sum(-1) / jnp.maximum(1, other_chain.sum(-1))).max()
 
     def ipsae(self, chain_index=None, raw_pae_threshold=15.0):
         raw_pae = self.pae * 32
@@ -867,6 +904,18 @@ class JoltzResult(eqx.Module):
 
     @property
     def ptm_score(self):
+        return self.index_ptm_score(self.chain_index)
+
+    def index_iptm(self, chain_index=None):
+        if chain_index is None:
+            chain_index = self.chain_index
+        ptm = self.ptm_matrix()
+        other_chain = chain_index[:, None] != chain_index[None, :]
+        return ((ptm * other_chain).sum(-1) / jnp.maximum(1, other_chain.sum(-1))).max()
+
+    def index_ptm_score(self, chain_index=None):
+        if chain_index is None:
+            chain_index = self.chain_index
         pae_logits = self.pae_logits
         num_aa = pae_logits.shape[0]
         if not self.is_single_sample:
@@ -880,10 +929,10 @@ class JoltzResult(eqx.Module):
         score = jax.nn.logsumexp(a=pae_logits, b=scale, axis=-1)
         if not self.is_single_sample:
             score = score.mean(axis=0)
-        chain = self.chain_index
-        other_chain = chain[:, None] != chain[None, :]
+        other_chain = chain_index[:, None] != chain_index[None, :]
         score = (score * other_chain).sum() / jnp.maximum(1, other_chain.sum())
         return score
+
 
     def chain_ptm(self, target_chain, source_chain=None):
         ptm = self.ptm_matrix()
