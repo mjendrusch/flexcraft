@@ -41,10 +41,10 @@ def data_from_salad(data: dict) -> DesignData:
         mask=data["mask"] * get_atom14_mask(data["aatype"]).any(axis=1)
     ))
 
-def load_pdb(path: str):
+def load_pdb(path: str, convert_chains=True):
     """Load a PDB file as DesignData."""
     with open(path, "rt") as f:
-        protein = from_pdb_string(f.read())
+        protein = from_pdb_string(f.read(), convert_chains=convert_chains)
     return data_from_protein(protein)
 
 def strip_aa(data):
