@@ -110,13 +110,10 @@ fitness = genetic_binder_fitness(af2, af2_params, key)
 
 search = genetic_search(proposal, fitness, init=lambda x: x, steps=10)
 
-
-# set up pyrosetta
-# pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball {opt.alphaball_path} '
-#         f'-corrections::beta_nov16 true -relax:default_repeats 1')
-
 # set up output files
-success, all_designs = setup_files(opt.out_path)
+# success, all_designs = setup_files(opt.out_path)
+success = ScoreCSV(f"{opt.out_path}/success.csv",
+                   keys=["attempt", "seq_id", "sequence", "ipae"])
 
 # sample structures
 success_count = 0
@@ -129,15 +126,16 @@ while success_count < opt.num_designs:
     init_data["pos"] = jnp.where(is_target[:, None, None], init_data["pos"], pos_center)
     # bias secondary structure
     init_data = bias_dssp(init_data, L=opt.l_bias, H=opt.h_bias, E=opt.e_bias, where=~is_target)
-    # successes, instances = search(
-    #     salad_params, key, init_data, init_prev,
-    #     log_to=f"{opt.out_path}/cycles/design_{attempt}")
     successes, instances = search(init_data, log_to=f"{opt.out_path}/cycles/design_{attempt}")
-    for i, (score, success, data) in enumerate(instances):
+    for i, (score, is_success, data) in enumerate(instances):
         result: DesignData = data["prediction"]
         result.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_{i}.pdb")
-        print(result.to_sequence_string().split(":")[-1], score, success)
-    for i, (score, success, data) in enumerate(successes):
+        print(result.to_sequence_string().split(":")[-1], score, is_success)
+    for i, (score, is_success, data) in enumerate(successes):
         prediction: DesignData = data["prediction"]
+        success.write_line(dict(
+            attempt=attempt, seq_id=i,
+            sequence=prediction.to_sequence_string().split(":")[-1],
+            ipae=score))
         prediction.save_pdb(f"{opt.out_path}/success/design_{attempt}_{i}.pdb")
     success_count += len(successes)

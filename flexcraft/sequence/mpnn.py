@@ -12,6 +12,9 @@ import jax
 import numpy as np
 import jax.numpy as jnp
 
+from flexcraft.data.data import DesignData
+import flexcraft.sequence.aa_codes as aas
+
 Gelu = functools.partial(jax.nn.gelu, approximate=False)
 
 
@@ -557,7 +560,7 @@ def load_params(params_path):
 
 
 def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scale_bias=None,
-               split_params=False):
+               split_params=False, standard_aa_code=False):
     config = {
         "num_letters": 21,
         "node_features": 128,
@@ -573,6 +576,10 @@ def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scal
     }
 
     def inner(x):
+        if standard_aa_code:
+            if isinstance(x, DesignData):
+                x = x.to_dict()
+            x["aa"] = aas.translate(x["aa"], aas.AF2_CODE, aas.PMPNN_CODE)
         return ProteinMPNN(**config)(x)
 
     run_pmpnn = hk.transform(inner).apply

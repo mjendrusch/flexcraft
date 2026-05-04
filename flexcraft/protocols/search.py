@@ -11,7 +11,7 @@ import flexcraft.sequence.aa_codes as aas
 from flexcraft.sequence.sample import *
 
 def beam_search(sampler: si.Sampler, fitness,
-                beam_width=4, expansion=4,
+                beam_width=4, num_expansion=4, num_successful=2,
                 beam_step=100, out_steps=400):
     def _rollout(params, key, data, current_step):
         sampler.return_prev = True
@@ -25,7 +25,7 @@ def beam_search(sampler: si.Sampler, fitness,
     def _search_step(params, key, instances, successes, current_step, log_to=None):
         results = []
         for j, (score, _, data) in enumerate(instances):
-            for i in range(expansion):
+            for i in range(num_expansion):
                 score, success, rollout_data = _rollout(params, key, data["data"], current_step)
                 if log_to is not None:
                     data_from_salad(rollout_data["data"][0]).save_pdb(f"{log_to}_search_{j}_{i}.pdb")
@@ -51,46 +51,54 @@ def beam_search(sampler: si.Sampler, fitness,
         for i in range(out_steps // beam_step):
             instances = _search_step(params, key, instances, successes, current_step, log_to=log_to)
             current_step += beam_step
+        successes = sorted(successes, key=lambda x: x[0])[:num_successful]
         return successes, instances
     return _run_search
 
-# TODO
-def genetic_search(proposal, fitness, init, population_size=4, expansion=4, steps=100):
+def genetic_search(proposal, fitness, init, num_population=4,
+                   num_expansion=4, num_success=2, steps=100):
     def _rollout(data, current_step):
-        out: DesignData = proposal(data, step=current_step)
+        out: dict = proposal(data, step=current_step)
         score, success, prediction = fitness(out)
+        above_contact_threshold = ... # TODO
+        if success or above_contact_threshold:
+            out.update(prediction.to_salad())
+            out["binder_center"] = ... # TODO
         return score, success, dict(prediction=prediction, data=out)
-    def _search_step(instances, successes, current_step, report=None):
+    def _search_step(instances, successes, current_step, report=None, log_to=None):
         results = []
         for j, (score, _, data) in enumerate(instances):
-            for i in range(expansion):
+            for i in range(num_expansion):
                 score, success, rollout_data = _rollout(data["data"], current_step)
                 if report is not None:
                     report(rollout_data)
                 print("step", current_step, "instance", f"{j}_{i}", score, success)
+                if log_to is not None:
+                    data_from_salad(rollout_data["data"]).save_pdb(f"{log_to}_search_{j}_{i}.pdb")
                 results.append((score, success, rollout_data))
                 if success:
                     successes.append((score, success, rollout_data))
         # sort results by score
         results = instances + results
-        results = sorted(results, key=lambda x: x[0])[:population_size]
+        results = sorted(results, key=lambda x: x[0])[:num_population]
         return results
     def _init_instances(data):
         instances = []
-        for i in range(population_size):
+        for i in range(num_population):
             score = 10_000
             rollout = dict(prediction=data, data=init(data))
             instances.append((score, False, rollout))
         return instances
-    def _run_search(data, report=None):
+    def _run_search(data, report=None, log_to=None):
         current_step = 0
         instances = _init_instances(data)
         successes = []
         for i in range(steps):
             instances = _search_step(
-                instances, successes,
-                current_step, report=report)
+                instances, successes, current_step,
+                report=report, log_to=log_to)
             current_step += 1
+        successes = sorted(successes, key=lambda x: x[0])[:num_success]
         return successes, instances
     return _run_search
 
@@ -108,6 +116,8 @@ def salad_proposal(salad_config, salad_params, pmpnn, keygen, step, **kwargs):
             pos=jnp.zeros_like(data["pos"]),
             local=jnp.zeros((data["pos"].shape[0], salad_config.local_size)))
         start_steps = random.choice([0, 100, 200, 300, 350])
+        if step == 0:
+            start_steps = 0
         salad_design = sampler(salad_params, keygen(), data, init_prev, start_steps=start_steps)
         design = data_from_salad(salad_design)
         aa_condition = aas.translate(data["aa_condition"], aas.AF2_CODE, aas.PMPNN_CODE)
@@ -143,8 +153,9 @@ def genetic_binder_fitness(af2, af_params, keygen):
         af_result.inputs["chain_index"] = is_binder.astype(jnp.int32)
         fitness = af_result.ipae
         success = (af_result.ipae <= 0.2) * (af_result.plddt[is_binder].mean() > 0.8)
+        result = af_result.to_data()
         print(fitness, result.to_sequence_string().split(":")[-1])
-        return fitness, success, af_result.to_data()
+        return fitness, success, result
     return _inner
 
 def binder_fitness(pmpnn, transform, af2, af_params, key):

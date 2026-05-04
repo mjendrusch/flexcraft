@@ -27,11 +27,14 @@ opt = parse_options(
     "predict structures with AlphaFold",
     pmpnn_path="params/solmpnn/v_48_030.pkl",
     target_path="target.pdb",
+    target_sequence="none",
+    target_chains="all",
     out_path="out",
     center="False",
     hallucination_model="joltz",
     model_name="model_1_ptm",
     param_path="params/af",
+    num_designs=48,
     length=80,
     repeat=1,
     temperature=0.1,
@@ -47,8 +50,16 @@ params = dict(
     mpnn=pmpnn_params
 )
 # retrieve target
-target = load_pdb(opt.target_path)
-target_sequence = target.to_sequence_string()
+if opt.target_sequence != "none":
+    target_sequence = opt.target_sequence
+else:
+    target = load_pdb(opt.target_path)
+    if opt.target_chains != "all":
+        selected_chains = np.array([
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(c)
+            for c in opt.target_chains], dtype=np.int32)
+        target = target[(target.chain_index[:, None] == selected_chains).any(axis=-1)]
+    target_sequence = target.to_sequence_string()
 # set up Boltz models
 model = Joltz2()
 # unknown-aa hallucination model
@@ -81,9 +92,6 @@ joltz_pred = model.predictor(
 def batch_mpnn(mpnn):
     def _mpnn_map(params, key, data):
         if len(data["atom_positions"].shape) == 4:
-            print("batching MPNN...")
-            for k, v in data.items():
-                print(k, v.shape)
             num_samples = data["atom_positions"].shape[0]
             # replicate all un-batched inputs
             xx = {
@@ -97,9 +105,6 @@ def batch_mpnn(mpnn):
             # vmap the ProteinMPNN
             return jax.vmap(mpnn, (None, 0, 0), 0)(params, keys, xx)
         else:
-            print("not batching MPNN...")
-            for k, v in data.items():
-                print(k, v.shape)
             return mpnn(params, key, data)
     return _mpnn_map
 
@@ -144,13 +149,22 @@ def _report_trajectory(index: int, writer: ScoreCSV, start_step=0):
         writer.write_line(line_info)
     return _report
 
-def _report_result(attempt: int, stage: str, key, writer: ScoreCSV, sequence, result: JoltzResult):
-    aux = metrics(sequence, key, result)
+def _report_result(attempt: int, stage: str, key, writer: ScoreCSV, sequence, result: JoltzResult, aux=None):
+    if aux is None:
+        aux = metrics(sequence, key, result)
     line_info = dict(attempt=attempt, stage=stage, sequence=aas.decode(jnp.argmax(sequence, axis=-1), aas.AF2_CODE))
     for key in writer.keys:
         if key in aux:
             line_info[key] = float(aux[key].mean())
     writer.write_line(line_info)
+    return aux
+
+def _passing(aux):
+    return (
+        aux["ipsae"] > 0.75 and aux["plddt"] > 0.8
+        and aux["binder_target_pae"] < 5.0 and aux["target_binder_pae"] < 5.0
+        and aux["recovery"] > 0.6
+    )
 
 # fitness function for hallucination
 def loss(sequence, key=kval, context=None, params=None):
@@ -174,7 +188,7 @@ def loss(sequence, key=kval, context=None, params=None):
 
     # combination
     value = (
-        out["binder_target_contacts"]
+          out["binder_target_contacts"]
         + out["within_binder_contacts"]
         - 10.0 * out["recovery"]
         + 0.05 * out["target_binder_pae"]
@@ -189,6 +203,7 @@ def loss(sequence, key=kval, context=None, params=None):
 loss_update = jit_loss_update(loss)
 
 os.makedirs(f"{opt.out_path}/attempts/", exist_ok=True)
+os.makedirs(f"{opt.out_path}/success/", exist_ok=True)
 trajectory_keys = [
     "plddt",
     "recovery",
@@ -207,9 +222,14 @@ results_keys = [
     "attempt", "stage", "sequence"
 ] + trajectory_keys
 results = ScoreCSV(f"{opt.out_path}/results.csv", keys=results_keys)
+success = ScoreCSV(f"{opt.out_path}/success.csv", keys=results_keys)
 
-
-for idx in range(100):
+success_count = 0
+attempt = 0
+_attempt = 0
+while success_count < opt.num_designs:
+    attempt = _attempt
+    _attempt += 1
     context = dict(
         recovery=10.0,
         ipae=0.05,
@@ -218,12 +238,7 @@ for idx in range(100):
     sequence *= np.random.uniform(low=0.75, high=5.0)
     sequence = jnp.array(sequence, dtype=jnp.float32)
     sequence = jax.nn.softmax(sequence, axis=-1)
-    # predict structure of initial sequence
-    prediction = joltz_pred(
-        key(), dict(kind="protein",
-                    sequence=aas.decode(np.argmax(sequence, axis=-1), aas.AF2_CODE)))
-    prediction.save_pdb(f"{opt.out_path}/attempts/initial_{idx}_0.pdb")
-    sequence, loss, aux = simplex_agpm(
+    sequence, loss_val, aux = simplex_agpm(
         sequence, loss_update, key=key, params=params, context=context,
         num_steps=100, # 100
         lr=0.1 * jnp.sqrt(sequence.shape[0]), momentum=0.3,
@@ -231,18 +246,19 @@ for idx in range(100):
         grad_transform=optax.clip_by_global_norm(1.0),
         param_transform=lambda x: x.at[:, aas.AF2_CODE.index("C")].set(0.0),
         verbose=True, return_last=False,
-        early_stop=lambda x, y: y["plddt"] > 0.9,
-        report=_report_trajectory(idx, trajectory, start_step=0))
+        early_stop=None,
+        report=_report_trajectory(attempt, trajectory, start_step=0))
+    sequence_1 = sequence
     result = aux["result"]
     if opt.hallucination_model == "af2":
-        result.save_pdb(f"{opt.out_path}/attempts/raw_{idx}_0.pdb")
+        result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_0.pdb")
     data = result.to_data()
-    prediction = joltz_pred(key(), dict(kind="protein", sequence=data.to_sequence_string()[:binder_length]))
-    _report_result(idx, "stage_1", key(), results, sequence, prediction.result)
-    prediction.save_pdb(f"{opt.out_path}/attempts/design_{idx}_0.pdb")
+    prediction_1 = joltz_pred(key(), dict(kind="protein", sequence=data.to_sequence_string()[:binder_length]))
+    stage_1 = _report_result(attempt, "stage_1", key(), results, sequence, prediction_1.result)
+    prediction_1.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_1.pdb")
     sequence = jnp.log(sequence + 1e-5)
     context["recovery"] = 10.0
-    sequence, loss, aux = simplex_agpm(
+    sequence, loss_val, aux = simplex_agpm(
         sequence, loss_update, key=key, params=params, context=context,
         num_steps=50, # 50
         lr=0.5 * jnp.sqrt(sequence.shape[0]),
@@ -250,12 +266,25 @@ for idx in range(100):
         grad_transform=optax.clip_by_global_norm(1.0),
         param_transform=lambda x: x.at[:, aas.AF2_CODE.index("C")].set(-1e6),
         verbose=True, return_last=True, opt_logits=True,
-        report=_report_trajectory(idx, trajectory, start_step=100))
-    print(aux["binder_target_pae"], aux["recovery"])
+        report=_report_trajectory(attempt, trajectory, start_step=100))
+    sequence_2 = sequence
     result = aux["result"]
     if opt.hallucination_model == "af2":
-        result.save_pdb(f"{opt.out_path}/attempts/raw_{idx}_1.pdb")
+        result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_1.pdb")
     data = result.to_data()
-    prediction = joltz_pred(key(), dict(kind="protein", sequence=data.to_sequence_string()[:binder_length]))
-    _report_result(idx, "stage_2", key(), results, sequence, prediction.result)
-    prediction.save_pdb(f"{opt.out_path}/attempts/design_{idx}_1.pdb")
+    prediction_2 = joltz_pred(key(), dict(kind="protein", sequence=data.to_sequence_string()[:binder_length]))
+    stage_2 = _report_result(attempt, "stage_2", key(), results, sequence, prediction_2.result)
+    prediction_2.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_2.pdb")
+    stage = "stage_2"
+    aux = stage_2
+    prediction = prediction_2
+    sequence = sequence_2
+    if stage_2["ipsae"] < stage_1["ipsae"] and _passing(stage_1):
+        stage = "stage_1"
+        aux = stage_1
+        prediction = prediction_1
+        sequence = sequence_1
+    if _passing(aux):
+        _report_result(attempt, stage, key(), success, sequence, prediction.result, aux=aux)
+        prediction.save_pdb(f"{opt.out_path}/success/design_{attempt}_{stage}.pdb")
+        success_count += 1
