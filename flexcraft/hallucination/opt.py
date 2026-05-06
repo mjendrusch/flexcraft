@@ -68,9 +68,12 @@ def simplex_apgm_step(loss_update, key=None, params=None, lr=0.1, momentum=0.0,
 def _report_aux(aux):
     res = []
     for key, value in aux.items():
-        if key == "result":
+        if key in ("result", "logits"):
             continue
-        res.append(f"{key} = {value:.2f}")
+        try:
+            res.append(f"{key} = {value:.2f}")
+        except TypeError as e:
+            continue
     print(*res)
 
 def simplex_agpm_state(x):

@@ -18,7 +18,7 @@ def translate(aatype, from_code, to_code):
     Returns:
         Sequence encoded by `aatype`, re-encoded according to `to_code`.
     """
-    code_mapping = np.array([to_code.index(c) for c in from_code] + [20], dtype=np.int32)
+    code_mapping = jnp.array([to_code.index(c) for c in from_code] + [20], dtype=jnp.int32)
     return code_mapping[aatype]
 
 def translate_onehot(one_hot, from_code, to_code):

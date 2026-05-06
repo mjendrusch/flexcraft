@@ -28,6 +28,7 @@ opt = parse_options(
     pmpnn_path="params/solmpnn/v_48_030.pkl",
     target_path="target.pdb",
     target_sequence="none",
+    off_target_sequence="none",
     target_chains="all",
     out_path="out",
     center="False",
@@ -60,6 +61,9 @@ else:
             for c in opt.target_chains], dtype=np.int32)
         target = target[(target.chain_index[:, None] == selected_chains).any(axis=-1)]
     target_sequence = target.to_sequence_string()
+off_target_sequence = None
+if opt.off_target_sequence != "none":
+    off_target_sequence = opt.off_target_sequence.strip()
 # set up Boltz models
 model = Joltz2()
 # unknown-aa hallucination model
@@ -69,6 +73,13 @@ if opt.hallucination_model == "joltz":
         dict(kind="protein", sequence=target_sequence, use_msa=True),
         num_recycle=4)
     params["joltz"] = joltz_params
+    joltz_off = None
+    if off_target_sequence is not None:
+        joltz_off, off_params, _ = model.evaluator(
+            dict(kind="protein", sequence="X" * binder_length),
+            dict(kind="protein", sequence=off_target_sequence, use_msa=True),
+            num_recycle=4)
+        params["off"] = off_params
 elif opt.hallucination_model == "af2":
     writer = ...
     af2_params = get_model_haiku_params(
@@ -110,7 +121,7 @@ def batch_mpnn(mpnn):
 
 def metrics(sequence, key, result: JoltzResult):
     res_data = result.to_data(return_samples=True)
-    pmpnn_input = res_data
+    pmpnn_input = res_data.update(aa=aas.translate(res_data["aa"], aas.AF2_CODE, aas.PMPNN_CODE))
     is_binder = jnp.zeros((pmpnn_input.aa.shape[0],), dtype=jnp.bool_).at[:binder_length].set(True)
     logits = batch_mpnn(pmpnn)(params["mpnn"], key, pmpnn_input.drop_aa(where=is_binder))["logits"]
     logits = aas.translate_onehot(logits, aas.PMPNN_CODE, aas.AF2_CODE)[..., :20]
@@ -127,6 +138,7 @@ def metrics(sequence, key, result: JoltzResult):
         plddt = plddt.mean(axis=0)
         pae = pae.mean(axis=0)
     return dict(
+        logits = logits,
         plddt = plddt[:binder_length].mean(),
         recovery = (sequence * prob).sum(axis=-1).mean(),
         binder_target_contacts = result.chain_contact_score(1, 0, num_contacts=3, contact_distance=20.0),
@@ -140,9 +152,44 @@ def metrics(sequence, key, result: JoltzResult):
         average_num_nonzero = (sequence > 0.01).sum(axis=-1).mean(),
     )
 
+def off_target_metrics(sequence, key, target_logits: jax.Array, off_target_result: JoltzResult):
+    res_data = off_target_result.to_data(return_samples=True)
+    pmpnn_input = res_data.update(aa=aas.translate(res_data["aa"], aas.AF2_CODE, aas.PMPNN_CODE))
+    is_binder = jnp.zeros((pmpnn_input.aa.shape[0],), dtype=jnp.bool_).at[:binder_length].set(True)
+    logits = batch_mpnn(pmpnn)(params["mpnn"], key, pmpnn_input.drop_aa(where=is_binder))["logits"]
+    logits = aas.translate_onehot(logits, aas.PMPNN_CODE, aas.AF2_CODE)[..., :20]
+    if not off_target_result.is_single_sample:
+        logits = logits.mean(axis=0)
+    logits = logits[:binder_length]
+    center = logits.mean(axis=0)
+    logits = logits - center
+    diff_mask = target_logits.argmax(axis=1) != logits.argmax(axis=1)
+    # off_target_logits = logits
+    # where the off-target logits differ from the target logits,
+    # apply guidance to reinforce on-target interactions
+    # delta_logits = target_logits - off_target_logits
+    # change_positions = (abs(delta_logits) >= 0.1).any(axis=1)
+    # jnp.where(change_positions[:, None], delta_logits, target_logits)
+    # logits = target_logits
+    prob = jax.lax.stop_gradient(jax.nn.softmax(logits.at[:, aas.AF2_CODE.index("C")].set(-1e6) / 0.1, axis=-1))
+    pae = 32 * off_target_result.pae
+    if not off_target_result.is_single_sample:
+        pae = pae.mean(axis=0)
+    return dict(
+        # logits = logits,
+        # recovery = (sequence * prob).sum(axis=-1).mean(),
+        off_target_recovery = ((sequence * prob).sum(axis=-1) * diff_mask).sum() / jnp.maximum(1, diff_mask.sum()),
+        off_target_contacts = off_target_result.chain_contact_score(1, 0, num_contacts=3, contact_distance=20.0),
+        binder_off_target_pae = pae[:binder_length, binder_length:].mean(),
+        off_target_binder_pae = pae[binder_length:, :binder_length].mean(),
+        off_target_iptm = off_target_result.iptm,
+        off_target_ipsae = off_target_result.ipsae(chain_index=is_binder),
+    )
+
 def _report_trajectory(index: int, writer: ScoreCSV, start_step=0):
     def _report(step: int, loss: float, aux: dict):
-        line_info = dict(attempt=index, step=start_step + step, total=loss)
+        print(loss.shape)
+        line_info = dict(attempt=index, step=start_step + step, total=float(loss.mean()))
         for key in writer.keys:
             if key in aux:
                 line_info[key] = float(aux[key].mean())
@@ -168,12 +215,13 @@ def _passing(aux):
 
 # fitness function for hallucination
 def loss(sequence, key=kval, context=None, params=None):
+    keys = jax.random.split(key, 4)
     # forbid cysteines
     sequence = sequence.at[:, aas.AF2_CODE.index("C")].set(0.0)
     sequence = sequence / sequence.sum(axis=1, keepdims=True)
     # predict structure
     if "joltz" in params:
-        result: JoltzResult = joltz(params["joltz"]).predict(key, sequence, num_samples=4)
+        result: JoltzResult = joltz(params["joltz"]).predict(keys[0], sequence, num_samples=4)
         # res_data = result.to_data(return_samples=True)
     elif "af2" in params:
         target_sequence = jax.nn.one_hot(
@@ -181,9 +229,13 @@ def loss(sequence, key=kval, context=None, params=None):
         af_data = af_template_data.update_sequence(
             jnp.concatenate((sequence, target_sequence), axis=0))
         af_data = af_data.block_diagonal(2)
-        result: AFResult = af2(params["af2"], key, af_data)
+        result: AFResult = af2(params["af2"], keys[0], af_data)
     # compute losses
-    out = metrics(sequence, key, result)
+    out = metrics(sequence, keys[1], result)
+    # optionally include target binding loss
+    if joltz_off is not None:
+        off_target_result: JoltzResult = joltz_off(params["off"]).predict(keys[2], sequence, num_samples=4)
+        out.update(off_target_metrics(sequence, keys[3], out["logits"], off_target_result))
     out["result"] = result
 
     # combination
@@ -198,13 +250,22 @@ def loss(sequence, key=kval, context=None, params=None):
         - 0.025 * out["iptm"]
         - 0.025 * out["eptm"]
     )
+    if joltz_off is not None:
+        value += (
+            # also impacts on-target recovery
+            5.0 * out["off_target_recovery"].mean()
+            #- out["off_target_contacts"].mean()
+            #- 0.2 * out["off_target_binder_pae"].mean()
+            #- 0.2 * out["binder_off_target_pae"].mean()
+            #+ 0.05 * out["off_target_iptm"].mean()
+        )
     out["total"] = value
     return value, out
 loss_update = jit_loss_update(loss)
 
 os.makedirs(f"{opt.out_path}/attempts/", exist_ok=True)
 os.makedirs(f"{opt.out_path}/success/", exist_ok=True)
-trajectory_keys = [
+common_keys = [
     "plddt",
     "recovery",
     "binder_target_contacts",
@@ -217,10 +278,15 @@ trajectory_keys = [
     "ipsae",
     "average_num_nonzero",
 ]
+trajectory_keys = [k for k in common_keys]
+if joltz_off is not None:
+    trajectory_keys += [
+        "off_target_contacts", "off_target_binder_pae",
+        "off_target_iptm", "off_target_recovery"]
 trajectory = ScoreCSV(f"{opt.out_path}/trajectory.csv", keys=["attempt", "step"] + trajectory_keys)
 results_keys = [
     "attempt", "stage", "sequence"
-] + trajectory_keys
+] + common_keys
 results = ScoreCSV(f"{opt.out_path}/results.csv", keys=results_keys)
 success = ScoreCSV(f"{opt.out_path}/success.csv", keys=results_keys)
 
