@@ -117,6 +117,11 @@ class DesignData:
             data=tree.map_structure(np.array, self.data))
 
     @property
+    def is_single_sample(self) -> bool:
+        """DesignData object contains a single structure."""
+        return self.data["atom_positions"].ndim == 3
+
+    @property
     def protein(self) -> "DesignData":
         """The protein-only portion of a DesignData object."""
         if "residue_type" in self.data:
@@ -158,15 +163,21 @@ class DesignData:
     @property
     def p_dssp(self) -> Dict[str, float]:
         data = self.assign_dssp()
-        L, H, E = jax.nn.one_hot(data.dssp, 3).mean(axis=0).T
+        L, H, E = jax.nn.one_hot(data.dssp, 3).reshape(-1, 3).mean(axis=0).T
         return dict(L=L, H=H, E=E)
 
     def assign_dssp(self) -> "DesignData":
         result = self
-        dssp, *_ = assign_dssp(
-            self.data["atom_positions"][:, :4],
-            self.data["batch_index"],
-            self.data["atom_mask"][:, :4].all(axis=1))
+        if self.is_single_sample:
+            dssp, *_ = assign_dssp(
+                self.data["atom_positions"][:, :4],
+                self.data["batch_index"],
+                self.data["atom_mask"][:, :4].all(axis=1))
+        else:
+            dssp, *_ = jax.vmap(assign_dssp, in_axes=(0, None, None), out_axes=0)(
+                self.data["atom_positions"][:, :, :4],
+                self.data["batch_index"],
+                self.data["atom_mask"][:, :4].all(axis=1))
         self.data["dssp"] = dssp
         return result
 
@@ -259,9 +270,15 @@ class DesignData:
         if not isinstance(index, (list, tuple)):
             index = [index]
 
+        if self.is_single_sample:
+            return DesignData(
+                data={k: jnp.concatenate([v[c] for c in index], axis=0)
+                    for k, v in self.data.items()})
         return DesignData(
             data={k: jnp.concatenate([v[c] for c in index], axis=0)
-                  for k, v in self.data.items()})
+                     if k != "atom_positions"
+                     else jnp.concatenate([v[:, c] for c in index], axis=0)
+                    for k, v in self.data.items()})
 
     def update_index(self, index, value=None, **kwargs):
         """Update the entries of a DesignData object at a given index.
