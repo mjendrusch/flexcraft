@@ -3,6 +3,7 @@
 
 import os
 import time
+import numpy as np
 import jax
 import haiku as hk
 
@@ -19,9 +20,22 @@ from flexcraft.data.data import DesignData
 from flexcraft.sequence.mpnn import make_pmpnn
 import flexcraft.sequence.aa_codes as aas
 from flexcraft.hallucination.opt import jit_loss_update, simplex_agpm
-from flexcraft.structure.boltz._model import Joltz2, JoltzResult
+from flexcraft.structure.boltz._model import Joltz2, JoltzResult, Joltz2Writer
+from flexcraft.structure.boltz._data import JoltzSpec, JoltzInput
 from flexcraft.structure.af import AFInput, AFResult, make_af2, make_predict
 from flexcraft.files.csv import ScoreCSV
+
+def _parse_hotspots(spec: str, binder_length = 100) -> None | np.ndarray:
+    if spec == "none":
+        return None
+    return binder_length + np.concatenate([
+        _parse_chunk(c) for c in spec.split(",")], axis=0)
+
+def _parse_chunk(spec: str) -> np.ndarray:
+    if "-" not in spec:
+        return np.array([int(spec) - 1], dtype=np.int32)
+    start, end = [int(c) for c in spec.split("-")]
+    return np.arange(start - 1, end, dtype=np.int32)
 
 opt = parse_options(
     "predict structures with AlphaFold",
@@ -29,6 +43,7 @@ opt = parse_options(
     target_path="target.pdb",
     target_sequence="none",
     off_target_sequence="none",
+    hotspots="none",
     target_chains="all",
     out_path="out",
     center="False",
@@ -50,6 +65,8 @@ pmpnn, pmpnn_params = make_pmpnn(opt.pmpnn_path, eps=0.05, split_params=True)
 params = dict(
     mpnn=pmpnn_params
 )
+# hotspot index
+hotspot_index = _parse_hotspots(opt.hotspots, binder_length = binder_length)
 # retrieve target
 if opt.target_sequence != "none":
     target_sequence = opt.target_sequence
@@ -68,18 +85,20 @@ if opt.off_target_sequence != "none":
 model = Joltz2()
 # unknown-aa hallucination model
 if opt.hallucination_model == "joltz":
-    joltz, joltz_params, writer = model.evaluator(
-        dict(kind="protein", sequence="X" * binder_length),
-        dict(kind="protein", sequence=target_sequence, use_msa=True),
-        num_recycle=4)
+    joltz, joltz_params = model.evaluator(num_recycle=4)
+    joltz_spec = (JoltzSpec()
+        .add_protein("X" * binder_length)
+        .add_protein(*[c for c in target_sequence.split(":")], use_msa=True))
+    joltz_input, writer = joltz_spec.to_input(pad=False)
     params["joltz"] = joltz_params
+    params["joltz_input"] = joltz_input
     joltz_off = None
     if off_target_sequence is not None:
-        joltz_off, off_params, _ = model.evaluator(
-            dict(kind="protein", sequence="X" * binder_length),
-            dict(kind="protein", sequence=off_target_sequence, use_msa=True),
-            num_recycle=4)
-        params["off"] = off_params
+        off_input, _ = (JoltzSpec()
+            .add_protein("X" * binder_length)
+            .add_protein(*[c for c in off_target_sequence.split(":")], use_msa=True)
+            .to_input(pad=False))
+        params["off_input"] = off_input
 elif opt.hallucination_model == "af2":
     writer = ...
     af2_params = get_model_haiku_params(
@@ -96,9 +115,7 @@ elif opt.hallucination_model == "af2":
         design_data, where=is_target)
     params["af2"] = af2_params
 # full-atom predictor with context
-joltz_pred = model.predictor(
-    dict(kind="protein", sequence=target_sequence, use_msa=True),
-    num_recycle=4)
+joltz_pred = model.predictor(num_recycle=4)
 
 def batch_mpnn(mpnn):
     def _mpnn_map(params, key, data):
@@ -121,6 +138,8 @@ def batch_mpnn(mpnn):
 
 def metrics(sequence, key, result: JoltzResult):
     res_data = result.to_data(return_samples=True)
+    binder_data = res_data[:binder_length]
+    dssp = binder_data.p_dssp
     pmpnn_input = res_data.update(aa=aas.translate(res_data["aa"], aas.AF2_CODE, aas.PMPNN_CODE))
     is_binder = jnp.zeros((pmpnn_input.aa.shape[0],), dtype=jnp.bool_).at[:binder_length].set(True)
     logits = batch_mpnn(pmpnn)(params["mpnn"], key, pmpnn_input.drop_aa(where=is_binder))["logits"]
@@ -137,19 +156,36 @@ def metrics(sequence, key, result: JoltzResult):
     if not result.is_single_sample:
         plddt = plddt.mean(axis=0)
         pae = pae.mean(axis=0)
+    binder_selector = result.chain_index == 0
+    hotspot_selector = result.chain_index != 0
+    if hotspot_index is not None:
+        hotspot_selector = (np.arange(result.residue_index.shape[0])[:, None] == hotspot_index).any(axis=-1)
+    hotspot_contacts = (
+        result.index_contact_score(
+            binder_selector, hotspot_selector, # NOTE: flip target and binder here
+            num_contacts=3, contact_distance=20.0)
+      + result.index_contact_score(
+            hotspot_selector, binder_selector, # NOTE: flip target and binder here
+            num_contacts=3, contact_distance=20.0)
+    ) / 2
+    binder_target_contacts = result.chain_contact_score(1, 0, num_contacts=3, contact_distance=20.0)
+    if hotspot_index is not None:
+        binder_target_contacts = hotspot_contacts
     return dict(
         logits = logits,
         plddt = plddt[:binder_length].mean(),
         recovery = (sequence * prob).sum(axis=-1).mean(),
-        binder_target_contacts = result.chain_contact_score(1, 0, num_contacts=3, contact_distance=20.0),
+        binder_target_contacts = binder_target_contacts,
         within_binder_contacts = result.chain_contact_score(0, 0, num_contacts=25, min_resi_distance=10),
+        hotspot_contacts = hotspot_contacts,
         within_binder_pae = pae[:binder_length, :binder_length].mean(),
         binder_target_pae = pae[:binder_length, binder_length:].mean(),
         target_binder_pae = pae[binder_length:, :binder_length].mean(),
-        iptm = result.iptm,
-        eptm = result.ptm_score,
+        iptm = result.index_iptm(chain_index=is_binder),
+        eptm = result.index_ptm_score(chain_index=is_binder),
         ipsae = result.ipsae(chain_index=is_binder),
         average_num_nonzero = (sequence > 0.01).sum(axis=-1).mean(),
+        L = dssp["L"], H = dssp["H"], E = dssp["E"]
     )
 
 def off_target_metrics(sequence, key, target_logits: jax.Array, off_target_result: JoltzResult):
@@ -219,9 +255,11 @@ def loss(sequence, key=kval, context=None, params=None):
     # forbid cysteines
     sequence = sequence.at[:, aas.AF2_CODE.index("C")].set(0.0)
     sequence = sequence / sequence.sum(axis=1, keepdims=True)
+    # set sequence
+    joltz_input: JoltzInput = params["joltz_input"].set_aa(sequence)
     # predict structure
     if "joltz" in params:
-        result: JoltzResult = joltz(params["joltz"]).predict(keys[0], sequence, num_samples=4)
+        result: JoltzResult = joltz(params["joltz"]).predict(keys[0], joltz_input, num_samples=4)
         # res_data = result.to_data(return_samples=True)
     elif "af2" in params:
         target_sequence = jax.nn.one_hot(
@@ -233,8 +271,9 @@ def loss(sequence, key=kval, context=None, params=None):
     # compute losses
     out = metrics(sequence, keys[1], result)
     # optionally include target binding loss
-    if joltz_off is not None:
-        off_target_result: JoltzResult = joltz_off(params["off"]).predict(keys[2], sequence, num_samples=4)
+    if "off_input" in params:
+        off_input: JoltzInput = params["off_input"].set_aa(sequence)
+        off_target_result: JoltzResult = joltz(params["joltz"]).predict(keys[2], off_input, num_samples=4)
         out.update(off_target_metrics(sequence, keys[3], out["logits"], off_target_result))
     out["result"] = result
 
@@ -250,11 +289,11 @@ def loss(sequence, key=kval, context=None, params=None):
         - 0.025 * out["iptm"]
         - 0.025 * out["eptm"]
     )
-    if joltz_off is not None:
+    if "off_input" in params:
         value += (
             # also impacts on-target recovery
-            5.0 * out["off_target_recovery"].mean()
-            #- out["off_target_contacts"].mean()
+            #5.0 * out["off_target_recovery"].mean()
+            - out["off_target_contacts"].mean()
             #- 0.2 * out["off_target_binder_pae"].mean()
             #- 0.2 * out["binder_off_target_pae"].mean()
             #+ 0.05 * out["off_target_iptm"].mean()
@@ -269,6 +308,7 @@ common_keys = [
     "plddt",
     "recovery",
     "binder_target_contacts",
+    "hotspot_contacts",
     "within_binder_contacts",
     "within_binder_pae",
     "binder_target_pae",
@@ -277,6 +317,7 @@ common_keys = [
     "eptm",
     "ipsae",
     "average_num_nonzero",
+    "L", "H", "E"
 ]
 trajectory_keys = [k for k in common_keys]
 if joltz_off is not None:
@@ -319,7 +360,11 @@ while success_count < opt.num_designs:
     if opt.hallucination_model == "af2":
         result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_0.pdb")
     data = result.to_data()
-    prediction_1 = joltz_pred(key(), dict(kind="protein", sequence=data.to_sequence_string()[:binder_length]))
+    prediction_1 = joltz_pred(
+        key(),
+        JoltzSpec()
+            .add_protein(data.to_sequence_string()[:binder_length])
+            .add_protein(*[c for c in target_sequence.split(":")], use_msa=True))
     stage_1 = _report_result(attempt, "stage_1", key(), results, sequence, prediction_1.result)
     prediction_1.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_1.pdb")
     sequence = jnp.log(sequence + 1e-5)
@@ -338,7 +383,11 @@ while success_count < opt.num_designs:
     if opt.hallucination_model == "af2":
         result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_1.pdb")
     data = result.to_data()
-    prediction_2 = joltz_pred(key(), dict(kind="protein", sequence=data.to_sequence_string()[:binder_length]))
+    prediction_2 = joltz_pred(
+        key(),
+        JoltzSpec()
+            .add_protein(data.to_sequence_string()[:binder_length])
+            .add_protein(*[c for c in target_sequence.split(":")], use_msa=True))
     stage_2 = _report_result(attempt, "stage_2", key(), results, sequence, prediction_2.result)
     prediction_2.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_2.pdb")
     stage = "stage_2"
