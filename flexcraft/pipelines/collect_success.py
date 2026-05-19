@@ -1,7 +1,6 @@
 import os
 import shutil
 from flexcraft.utils import load_pdb
-import flexcraft.sequence.aa_codes as aas
 from flexcraft.utils.options import parse_options
 
 opt = parse_options(
@@ -49,6 +48,10 @@ with open(f"{opt.out_path}/success.csv", "wt") as out_f, open(f"{opt.out_path}/s
         else:
             success_path = f"{opt.in_path}/{subdir}/success/"
         for file_name in os.listdir(success_path):
+            if file_name.startswith("."):
+                continue
+            if not file_name.endswith(".pdb"):
+                continue
             design_path = f"{success_path}/{file_name}"
             data = load_pdb(design_path)
             sequence = data.to_sequence_string()
