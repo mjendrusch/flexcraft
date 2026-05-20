@@ -6,3 +6,8 @@ __pycache__/
 ._.DS_Store
 ._*
 flexcraft_params/
+params/
+data/o1_iptm_scoring/**/*.csv
+data/o1_iptm_scoring/**/*.pdb
+sandbox.ipynb
+logs/**/*

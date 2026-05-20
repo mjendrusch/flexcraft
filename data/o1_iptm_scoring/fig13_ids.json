@@ -1,0 +1,22 @@
+{
+    "7PA9":{"Antigen Chain ID":"D","Light Chain ID":"L","Heavy Chain ID":"K"},
+    "7Q6C":{"Antigen Chain ID":"A","Light Chain ID":"L","Heavy Chain ID":"H"},
+    "7R8U":{"Antigen Chain ID":["A","B"],"Light Chain ID":"L","Heavy Chain ID":"H", "skip":"multimer antigen"},
+    "7REW":{"Antigen Chain ID":"I","Light Chain ID":"L","Heavy Chain ID":"H"},
+    "7SEG":{"Antigen Chain ID":"C","Light Chain ID":"L","Heavy Chain ID":"H"},
+    "7TZH":{"Antigen Chain ID":"D","Light Chain ID":"C","Heavy Chain ID":"C", "skip":"single ab chain"},
+    "7U9W":{"Antigen Chain ID":"A","Light Chain ID":"H","Heavy Chain ID":"H", "skip":"single ab chain"},
+    "7UVF":{"Antigen Chain ID":"A","Light Chain ID":"L","Heavy Chain ID":"H"},
+    "7UXL":{"Antigen Chain ID":"R","Light Chain ID":"B","Heavy Chain ID":"A"},
+    "7VGS":{"Antigen Chain ID":"A","Light Chain ID":"C","Heavy Chain ID":"D"},
+    "8G3P":{"Antigen Chain ID":"B","Light Chain ID":"I","Heavy Chain ID":"C"},
+    "8GKL":{"Antigen Chain ID":"E","Light Chain ID":"L","Heavy Chain ID":"H"},
+    "8K0D":{"Antigen Chain ID":"A","Light Chain ID":"F","Heavy Chain ID":"E"},
+    "8PWW":{"Antigen Chain ID":"A","Light Chain ID":"B","Heavy Chain ID":"B", "skip":"single ab chain"},
+    "8SIC":{"Antigen Chain ID":"G","Light Chain ID":"L","Heavy Chain ID":"H"},
+    "8SOW":{"Antigen Chain ID":"A","Light Chain ID":"C","Heavy Chain ID":"C", "skip":"single ab chain"},
+    "8SXP":{"Antigen Chain ID":"C","Light Chain ID":"L","Heavy Chain ID":"H"},
+    "8T03":{"Antigen Chain ID":"A","Light Chain ID":"D","Heavy Chain ID":"C"},
+    "8U32":{"Antigen Chain ID":"A","Light Chain ID":"B","Heavy Chain ID":"C"},
+    "9JBQ":{"Antigen Chain ID":"C","Light Chain ID":"B","Heavy Chain ID":"A"}
+}

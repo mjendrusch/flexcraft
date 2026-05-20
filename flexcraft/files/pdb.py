@@ -17,7 +17,7 @@ class PDBFile:
         prefix: prefix string for creating temporary PDB files, if `path` is not provided.
         tmpdir: path to a temporary directory. If not provided, this is set to "tmp/".
     """
-    def __init__(self, data: DesignData | None=None, path=None, prefix="", tmpdir=None):
+    def __init__(self, data: DesignData | None=None, path=None, prefix="", tmpdir=None, convert_chains=True):
         self.prefix = prefix
         if tmpdir is None:
             tmpdir = "tmp/"
@@ -27,7 +27,7 @@ class PDBFile:
         self.path = path
         self.writable = False
         if data is None:
-            data = load_pdb(path)
+            data = load_pdb(path, convert_chains=convert_chains)
         else:
             self.writable = True
             data.save_pdb(path)
