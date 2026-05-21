@@ -88,7 +88,6 @@ class PDBFile:
         if self.temporary:
             os.remove(self.path)
             self.path = None
-        super().__del__()
 
     def keys(self):
         return self.data.keys()

@@ -146,7 +146,7 @@ class JoltzSpec:
                 raise NotImplementedError(f"Invalid template file '{path_or_object}'. "
                                           f"Has to be either '.pdb' or '.cif'.")
         elif isinstance(path_or_object, DesignData):
-            tmpfile = PDBFile(data = path_or_object)
+            tmpfile = PDBFile(data = path_or_object, temporary = True)
             self.temporaries.append(tmpfile)
             template_info["pdb"] = tmpfile.path
         else:
@@ -347,7 +347,7 @@ templates:"""
         if "chains" in template:
             template_yaml += f"""
     chain_id: [{', '.join(template['chains'])}]"""
-        if "template_chains" in template:
+        if "template_chains" in template and template["template_chains"] is not None:
             template_yaml += f"""
     template_chain_id: [{', '.join(template['template_chains'])}]"""
         template_yaml += "\n"
