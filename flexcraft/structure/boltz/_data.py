@@ -19,6 +19,7 @@ import torch
 from jax import numpy as jnp
 from jaxtyping import Array, Float, PyTree
 from flexcraft.data.data import DesignData
+from flexcraft.files.pdb import PDBFile
 from flexcraft.structure.boltz._utils import *
 
 
@@ -82,6 +83,7 @@ class JoltzSpec:
         self.chains = list(chains)
         self.templates = templates or list()
         self.constraints = constraints or list()
+        self.temporaries = list()
 
     def add_chain(self, *chains):
         _chains = []
@@ -134,7 +136,23 @@ class JoltzSpec:
         return self.add_chain(*_chains)
 
     def add_template(self, path_or_object, to_chains=None):
-        self.templates.append(dict(template=path_or_object, template_chains=to_chains))
+        template_info = dict(template=path_or_object, template_chains=to_chains)
+        if isinstance(path_or_object, str):
+            if path_or_object.endswith((".pdb", ".pdb1")):
+                template_info["pdb"] = path_or_object
+            elif path_or_object.endswith(".cif"):
+                template_info["cif"] = path_or_object
+            else:
+                raise NotImplementedError(f"Invalid template file '{path_or_object}'. "
+                                          f"Has to be either '.pdb' or '.cif'.")
+        elif isinstance(path_or_object, DesignData):
+            tmpfile = PDBFile(data = path_or_object)
+            self.temporaries.append(tmpfile)
+            template_info["pdb"] = tmpfile.path
+        else:
+            raise NotImplementedError(
+                "Input template has to be a path to a '.pdb' or '.cif' file.")
+        self.templates.append(template_info)
         return self
 
     def add_msa(self, to_chains=None):
