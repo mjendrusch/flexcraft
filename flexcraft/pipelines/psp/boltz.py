@@ -8,7 +8,7 @@ from flexcraft.structure.af import *
 from flexcraft.utils import Keygen, parse_options
 from flexcraft.files import ScoreCSV, FastaFile
 
-from flexcraft.structure.boltz._model import Joltz2, JoltzResult
+from flexcraft.structure.boltz._model import Joltz2, JoltzResult, JoltzSpec
 
 def ptm_score(logits, pair_mask=None, num_res=None):
     if pair_mask is None:
@@ -77,7 +77,7 @@ opt = parse_options(
 os.makedirs(f"{opt.out_path}/predictions/", exist_ok=True)
 
 key = Keygen(opt.seed)
-joltz = Joltz2(cache=opt.boltz_path).predictor_adhoc(
+joltz = Joltz2(cache=opt.boltz_path).predictor(
     num_recycle=opt.num_recycle, num_samples=opt.num_samples)
 scores = ScoreCSV(
     path=f"{opt.out_path}/scores.csv",
@@ -87,11 +87,9 @@ sequences = FastaFile(path=opt.in_path)
 for name, sequence in sequences.items():
     name = name.replace(":", "_binds_")
     chain_sequences = sequence.split(":")
-    input_chains = [
-        dict(kind="protein", sequence=c, use_msa=True)
-        for i, c in enumerate(chain_sequences)
-    ]
-    prediction = joltz(key(), *input_chains)
+    prediction = joltz(key(),
+        JoltzSpec()
+        .add_protein(*chain_sequences, use_msa=True))
     plddt = prediction.data["confidence"].plddt.mean()
     chain_index = prediction.data["features"]["asym_id"][0]
     other_chain = chain_index[:, None] != chain_index[None, :]
