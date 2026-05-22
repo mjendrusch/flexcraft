@@ -32,7 +32,7 @@ def _parse_subspec(spec: str) -> list:
             for i in range((end - begin) // step)
         ]
     else:
-        begin, end = _parse_range(head)
+        begin, end = _parse_range(spec)
         result = [(begin, end)]
     return result
 

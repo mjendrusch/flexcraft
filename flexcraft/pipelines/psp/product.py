@@ -20,7 +20,7 @@ if __name__ == "__main__":
 
     fasta_lists = []
     for path in opt.in_paths.split(","):
-        item = FastaFile(path=path)
+        item = FastaFile(path=path.strip())
         fasta_lists.append(item)
 
     output = _product(fasta_lists)
