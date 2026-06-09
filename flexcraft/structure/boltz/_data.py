@@ -57,7 +57,7 @@ def _prefix():
 sequences:"""
 
 def _make_features(chains: list, templates: list, constraints: list,
-                   cache="./params/boltz/"):
+                   cache="./params/boltz/", out_dir=None):
     chain_order = [c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
     yaml = "\n".join(
         [_prefix()]
@@ -73,17 +73,20 @@ def _make_features(chains: list, templates: list, constraints: list,
     has_constraint, constraint_yaml = build_constraint_yaml(constraints)
     if has_constraint:
         yaml += constraint_yaml
-    features, writer_spec = _features_from_yaml(yaml, cache=cache)
+    features, writer_spec = _features_from_yaml(yaml, cache=cache, out_dir=out_dir)
     if has_template:
         assert np.sum(features["template_mask"]) > 0
     return features, writer_spec
 
 class JoltzSpec:
-    def __init__(self, *chains, templates=None, constraints=None):
+    def __init__(self, *chains, templates=None, constraints=None, out_dir=None):
         self.chains = list(chains)
         self.templates = templates or list()
         self.constraints = constraints or list()
         self.temporaries = list()
+        # directory storing boltz results for recomputing,
+        # if None, temp dir will be created
+        self.out_dir = out_dir
 
     def add_chain(self, *chains):
         _chains = []
@@ -139,7 +142,8 @@ class JoltzSpec:
         template_info = dict(template=path_or_object, template_chains=to_chains)
         if isinstance(path_or_object, str):
             if path_or_object.endswith((".pdb", ".pdb1")):
-                template_info["pdb"] = path_or_object
+                path = self.prep_pdb(path_or_object)
+                template_info["cif"] = path
             elif path_or_object.endswith(".cif"):
                 template_info["cif"] = path_or_object
             else:
@@ -147,13 +151,23 @@ class JoltzSpec:
                                           f"Has to be either '.pdb' or '.cif'.")
         elif isinstance(path_or_object, DesignData):
             tmpfile = PDBFile(data = path_or_object, temporary = True)
+            tmpfile = self.prep_pdb(tmpfile.path)
             self.temporaries.append(tmpfile)
-            template_info["pdb"] = tmpfile.path
+            template_info["cif"] = tmpfile
         else:
             raise NotImplementedError(
                 "Input template has to be a path to a '.pdb' or '.cif' file.")
         self.templates.append(template_info)
         return self
+
+    def prep_pdb(self, path):
+        import os
+        from time import sleep
+        os.system(f"maxit -input {path} -output {Path(path).with_suffix('.cif')} -o 1")
+        while not Path(path).with_suffix('.cif').exists():
+            sleep(2)
+        return str(Path(path).with_suffix('.cif'))
+
 
     def add_msa(self, to_chains=None):
         if to_chains is None:
@@ -188,7 +202,7 @@ class JoltzSpec:
 
     def to_features(self, pad=True, cache="./params/boltz/") -> dict:
         features, writer_spec = _make_features(
-            self.chains, self.templates, self.constraints, cache=cache)
+            self.chains, self.templates, self.constraints, cache=cache, out_dir=self.out_dir)
         if pad:
             features = pad_boltz_atom_features_for_compilation(features)
         writer_features = {
@@ -199,6 +213,10 @@ class JoltzSpec:
         writer_spec["features_dict"] = writer_features
         features = jax.tree.map(jnp.array, features)
         return features, writer_spec
+
+    def set_out_dir(self, out_dir):
+        self.out_dir = Path(out_dir)
+        return self
 
     def to_input(self, pad=True, cache="./params/boltz/") -> "JoltzInput":
         features, writer_spec = self.to_features(pad=pad, cache=cache)
@@ -378,13 +396,22 @@ constraints:"""
 def _features_from_yaml(
     input_yaml_str: str,
     cache=Path("./params/boltz/").expanduser(),
+    out_dir=None,
 ) -> PyTree:
     if not isinstance(cache, Path):
         cache = Path(cache).expanduser()
-    out_dir_handle = (
-        TemporaryDirectory()
-    )  # this is sketchy -- we have to remember not to let this get garbage collected
-    out_dir = Path(out_dir_handle.name)
+    if out_dir is None:
+        out_dir_handle = (
+            TemporaryDirectory()
+        )  # this is sketchy -- we have to remember not to let this get garbage collected
+        out_dir = Path(out_dir_handle.name)
+    else:
+        class _wrap_path:
+            def __init__(self, path):
+                path = Path(path)
+                self.name = path.__str__()
+        out_dir_handle = _wrap_path(path=out_dir)
+
     # dump the yaml to a file
     input_data_path = out_dir / "input.yaml"
     input_data_path.write_text(input_yaml_str)
