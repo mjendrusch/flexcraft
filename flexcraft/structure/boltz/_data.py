@@ -139,7 +139,8 @@ class JoltzSpec:
         template_info = dict(template=path_or_object, template_chains=to_chains)
         if isinstance(path_or_object, str):
             if path_or_object.endswith((".pdb", ".pdb1")):
-                template_info["pdb"] = path_or_object
+                path = self.prep_pdb(path_or_object)
+                template_info["cif"] = path
             elif path_or_object.endswith(".cif"):
                 template_info["cif"] = path_or_object
             else:
@@ -147,13 +148,23 @@ class JoltzSpec:
                                           f"Has to be either '.pdb' or '.cif'.")
         elif isinstance(path_or_object, DesignData):
             tmpfile = PDBFile(data = path_or_object, temporary = True)
+            tmpfile = self.prep_pdb(tmpfile.path)
             self.temporaries.append(tmpfile)
-            template_info["pdb"] = tmpfile.path
+            template_info["cif"] = tmpfile
         else:
             raise NotImplementedError(
                 "Input template has to be a path to a '.pdb' or '.cif' file.")
         self.templates.append(template_info)
         return self
+
+    def prep_pdb(self, path):
+        import os
+        from time import sleep
+        os.system(f"maxit -input {path} -output {Path(path).with_suffix('.cif')} -o 1")
+        while not Path(path).with_suffix('.cif').exists():
+            sleep(2)
+        return str(Path(path).with_suffix('.cif'))
+
 
     def add_msa(self, to_chains=None):
         if to_chains is None:
