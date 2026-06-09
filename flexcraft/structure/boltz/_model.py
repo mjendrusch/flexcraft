@@ -64,6 +64,7 @@ def load_boltz2(model="boltz2_conf.ckpt", cache=Path("./params/boltz/")):
             )
         ),
         pairformer_args=asdict(boltz_main.PairformerArgsV2()),
+        weights_only=False
     ).eval()
 
     model = joltz.from_torch(torch_model)

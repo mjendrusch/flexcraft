@@ -7,7 +7,7 @@ __pycache__/
 ._*
 flexcraft_params/
 data/**/*
-params/**/*
+**/params/**/*
 logs/**/*
 **/*.log
 sandbox.ipynb
