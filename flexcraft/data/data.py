@@ -181,6 +181,14 @@ class DesignData:
         self.data["dssp"] = dssp
         return result
 
+    def distance_map(self, atom_index=4):
+        pos = self.atom5[..., atom_index, :]
+        return jnp.linalg.norm(pos[..., :, None, :] - pos[..., None, :, :], axis=-1)
+
+    def contacts(self, contact_distance=8.0, atom_index=4) -> jax.Array:
+        dist = self.distance_map(atom_index=atom_index)
+        return dist < contact_distance
+
     @property
     def aa(self) -> jax.Array | None:
         """The amino acid sequence of a DesignData object.

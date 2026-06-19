@@ -23,7 +23,29 @@ class JoltzResult(eqx.Module):
     @property
     def distogram_bin_edges(self):
         return jnp.linspace(2.0, 22.0, 65)
-    
+
+    @property
+    def sample_distogram(self):
+        if self.is_single_sample:
+            cb, _ = self.atom24_samples[:, 4]
+            ca, mask = self.atom24_samples[:, 1]
+            cb = jnp.where(mask[:, 4, None], cb, ca)
+            cb = cb[None]
+        else:
+            cb, _ = self.atom24_samples[..., 4, :]
+            ca, mask = self.atom24_samples[..., 1, :]
+            cb = jnp.where(mask[None, :, 4, None], cb, ca)
+        dist = jnp.linalg.norm(cb[..., :, None, :] - cb[..., None, :, :], axis=-1)
+        bin_centers = (self.distogram_bin_edges[:-1] + self.distogram_bin_edges[1:]) / 2
+        dist = jnp.argmax(dist[..., None] - bin_centers, axis=-1)
+        dist = jax.nn.one_hot(dist, 64).mean(axis=0)
+        return dist
+
+    def sample_distogram_nll(self):
+        gt = self.sample_distogram
+        predicted = self.log_distogram
+        return -(gt * predicted).sum(axis=-1).mean()
+
     @property
     def residue_index(self) -> jax.Array:
         return self.data["features"]["residue_index"][0]
@@ -119,7 +141,7 @@ class JoltzResult(eqx.Module):
         sample24, mask24 = self.atom24_samples
         pae = self.pae.mean(axis=(-1, -2))
         best_pae = jnp.argmin(pae, axis=0)
-        return sample24[0], mask24
+        return sample24[best_pae], mask24
 
     @property
     def atom14(self):

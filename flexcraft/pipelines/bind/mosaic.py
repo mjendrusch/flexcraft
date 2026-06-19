@@ -14,7 +14,7 @@ import optax
 
 from flexcraft.utils.options import parse_options
 from flexcraft.utils.rng import Keygen
-from flexcraft.utils import Keygen, parse_options, load_pdb, strip_aa, tie_homomer
+from flexcraft.utils import Keygen, parse_options, load_pdb, data_from_salad
 from flexcraft.sequence.sample import *
 from flexcraft.data.data import DesignData
 from flexcraft.sequence.mpnn import make_pmpnn
@@ -40,6 +40,8 @@ def _parse_chunk(spec: str) -> np.ndarray:
 opt = parse_options(
     "predict structures with AlphaFold",
     pmpnn_path="params/solmpnn/v_48_030.pkl",
+    salad_path="params/salad/default_vp_scaled-200k.jax",
+    boltz_path="params/boltz/",
     target_path="target.pdb",
     target_sequence="none",
     off_target_sequence="none",
@@ -50,6 +52,7 @@ opt = parse_options(
     hallucination_model="joltz",
     model_name="model_1_ptm",
     param_path="params/af",
+    sample_structure="False",
     num_designs=48,
     length=80,
     repeat=1,
@@ -57,14 +60,50 @@ opt = parse_options(
     samples=10,
     seed=42
 )
+
 binder_length = opt.length
 key = Keygen(opt.seed)
 kval = key()
 # set up protein mpnn
 pmpnn, pmpnn_params = make_pmpnn(opt.pmpnn_path, eps=0.05, split_params=True)
+jit_pmpnn = jax.jit(pmpnn)
 params = dict(
     mpnn=pmpnn_params
 )
+# set up salad
+sample_structure = opt.sample_structure == "True"
+sampler = None
+if sample_structure:
+    import salad.inference as si
+    def cloud_std_default(num_aa):
+        minval = num_aa ** 0.4
+        return minval + np.random.rand() * 3.0
+
+    def model_step(config):
+        config.eval = True
+        @hk.transform
+        def step(data, prev):
+            noise = si.StructureDiffusionNoise(config)
+            predict = si.StructureDiffusionPredict(config)
+            data.update(noise(data))
+            out, prev = predict(data, prev)
+            return out, prev
+        return step.apply
+
+    salad_config, salad_params = si.make_salad_model("default_vp_scaled", opt.salad_path)
+
+    # initialize salad data and prev from the num_aa specification
+    num_aa, resi, chain, is_cyclic, cyclic_mask = si.parse_num_aa(f"{opt.length}")
+    salad_data, init_prev = si.data.from_config(
+        salad_config,
+        num_aa=num_aa,
+        residue_index=resi,
+        chain_index=chain,
+        cyclic_mask=cyclic_mask)
+
+    salad_step = model_step(salad_config)
+    # build a sampler object for sampling
+    sampler = si.Sampler(salad_step, out_steps=400)
 # hotspot index
 hotspot_index = _parse_hotspots(opt.hotspots, binder_length = binder_length)
 # retrieve target
@@ -82,7 +121,7 @@ off_target_sequence = None
 if opt.off_target_sequence != "none":
     off_target_sequence = opt.off_target_sequence.strip()
 # set up Boltz models
-model = Joltz2()
+model = Joltz2(cache=opt.boltz_path)
 # unknown-aa hallucination model
 if opt.hallucination_model == "joltz":
     joltz, joltz_params = model.evaluator(num_recycle=4)
@@ -302,6 +341,8 @@ def loss(sequence, key=kval, context=None, params=None):
     return value, out
 loss_update = jit_loss_update(loss)
 
+if sample_structure:
+    os.makedirs(f"{opt.out_path}/blueprints/", exist_ok=True)
 os.makedirs(f"{opt.out_path}/attempts/", exist_ok=True)
 os.makedirs(f"{opt.out_path}/success/", exist_ok=True)
 common_keys = [
@@ -341,10 +382,23 @@ while success_count < opt.num_designs:
         recovery=10.0,
         ipae=0.05,
     )
-    sequence = jax.random.gumbel(key(), (opt.length, 20), dtype=jnp.float32)
-    sequence *= np.random.uniform(low=0.75, high=5.0)
-    sequence = jnp.array(sequence, dtype=jnp.float32)
-    sequence = jax.nn.softmax(sequence, axis=-1)
+    if sampler is not None:
+        salad_data["dssp_condition"], dssp_string = si.random_dssp(
+            num_aa, p=0.0, p_keep_loop=1.0, return_string=True)
+        print("DSSP target:", dssp_string)
+        salad_data["cloud_std"] = cloud_std_default(num_aa)
+        salad_design = sampler(salad_params, key(), salad_data, init_prev)
+        design = data_from_salad(salad_design)
+        design.save_pdb(f"{opt.out_path}/blueprints/design_{attempt}.pdb")
+        sequence = aas.translate_onehot(
+            jit_pmpnn(pmpnn_params, key(), design.drop_aa())["logits"],
+            aas.PMPNN_CODE, aas.AF2_CODE)[..., :20]
+        sequence = jax.nn.softmax(sequence, axis=-1)
+    else:
+        sequence = jax.random.gumbel(key(), (opt.length, 20), dtype=jnp.float32)
+        sequence *= np.random.uniform(low=0.75, high=5.0)
+        sequence = jnp.array(sequence, dtype=jnp.float32)
+        sequence = jax.nn.softmax(sequence, axis=-1)
     sequence, loss_val, aux = simplex_agpm(
         sequence, loss_update, key=key, params=params, context=context,
         num_steps=100, # 100

@@ -588,6 +588,25 @@ def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scal
         return run_pmpnn, params
     return lambda k, d: run_pmpnn(params, k, d)
 
+def batch_mpnn(mpnn):
+    def _mpnn_map(params, key, data):
+        if len(data["atom_positions"].shape) == 4:
+            num_samples = data["atom_positions"].shape[0]
+            # replicate all un-batched inputs
+            xx = {
+                key: jnp.repeat(data[key][None, :], num_samples, axis=0)
+                for key in ["atom_mask", "mask", "aa",
+                            "residue_index", "chain_index", "batch_index"]
+            }
+            # add in the batched atom positions
+            xx["atom_positions"] = data["atom_positions"]
+            # split keys across batch
+            keys = jax.random.split(key, num_samples)
+            # vmap the ProteinMPNN
+            return jax.vmap(mpnn, (None, 0, 0), 0)(params, keys, xx)
+        else:
+            return mpnn(params, key, data)
+    return _mpnn_map
 
 def sample_minent(mpnn, key, data):
     if "aa" not in data:

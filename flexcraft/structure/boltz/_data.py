@@ -1,5 +1,7 @@
 # adapted from mosaic ((c) 2025 escalante under MIT license)
 import shutil
+import gemmi
+from tempfile import NamedTemporaryFile
 from typing import Any, Literal, List
 import os
 from pathlib import Path
@@ -136,6 +138,7 @@ class JoltzSpec:
         return self.add_chain(*_chains)
 
     def add_template(self, path_or_object, to_chains=None):
+        # TODO: gemmi-based template sanitization
         template_info = dict(template=path_or_object, template_chains=to_chains)
         if isinstance(path_or_object, str):
             if path_or_object.endswith((".pdb", ".pdb1")):
@@ -147,8 +150,40 @@ class JoltzSpec:
                                           f"Has to be either '.pdb' or '.cif'.")
         elif isinstance(path_or_object, DesignData):
             tmpfile = PDBFile(data = path_or_object, temporary = True)
+            # ref_st = gemmi.read_structure(tmpfile.path)
+            # st = gemmi.Structure()
+            # model = gemmi.Model("0")
+            # entities = []
+
+            # ref_model: gemmi.Model = [m for m in ref_st][0]
+            # for chain in ref_model:
+            #     chain: gemmi.Chain
+            #     chain_id = chain.name
+            #     ent = gemmi.Entity(chain_id)
+            #     ent.entity_type = gemmi.EntityType.Polymer
+            #     ent.polymer_type = gemmi.PolymerType.PeptideL
+            #     ent.subchains = [chain_id]
+            #     ent.full_sequence = [r.name for r in chain]
+            #     entities.append(ent)
+            #     for r in chain:
+            #         r: gemmi.Residue
+            #         r.subchain = chain_id
+            #     model.add_chain(chain)
+
+            # st.add_model(model)
+            # st.entities = gemmi.EntityList(entities)
+            # st.assign_subchains()
+            # st.setup_entities()
+            # st.ensure_entities()
+            # st.assign_label_seq_id()
+
+            # tf = NamedTemporaryFile(suffix=".cif")
+
+            # st.setup_entities()
+            # doc = st.make_mmcif_document()
+            # doc.write_file(tf.name)
             self.temporaries.append(tmpfile)
-            template_info["pdb"] = tmpfile.path
+            template_info["cif"] = tmpfile.path
         else:
             raise NotImplementedError(
                 "Input template has to be a path to a '.pdb' or '.cif' file.")
@@ -248,14 +283,19 @@ class JoltzInput(eqx.Module):
         self.features["msa"] = self.features["msa"].at[0, 0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count])
         return self
 
-    def _set_sequence(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20):
+    def _set_sequence(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20,
+                      reset_msa=True, reset_profile=True):
         self = self._set_res_type(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
-        self = self._set_profile(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
-        self = self._set_msa(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
+        if reset_profile:
+            self = self._set_profile(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
+        if reset_msa:
+            self = self._set_msa(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
         return self
 
-    def set_aa(self, sequence, start=0):
-        return self._set_sequence(sequence, start=start)
+    def set_aa(self, sequence, start=0, reset_msa=True, reset_profile=True):
+        return self._set_sequence(sequence, start=start,
+                                  reset_msa=reset_msa,
+                                  reset_profile=reset_profile)
 
     def inherit_msa(self, data: "JoltzInput"):
         self.features["msa"] = data.features["msa"]
@@ -278,6 +318,20 @@ class JoltzInput(eqx.Module):
         # compute & set the profile
         self.features["profile"] = self.features["msa"].at[0, start:start + msa.shape[1]].set(msa.mean(axis=0))
         return self
+
+    def set_aa_msa(self, msa, start=0):
+        if msa.shape[-1] == 20:
+            msa_size = self.features["msa"].shape[-1]
+            seq_start = 2
+            msa = jnp.pad(msa, ((0, 0), (0, 0), (seq_start, msa_size - 20)))
+        aa = msa[0]
+        aa = aa[..., 2:22]
+        return self.set_aa(aa, start=start).set_msa(msa, start=start)
+
+    def set_aa_msa_random(self, key, msa, start=0):
+        index = jax.random.permutation(key, msa.shape[0])
+        msa = msa[index]
+        return self.set_aa_msa(msa, start=start)
 
     def set_rna(self, sequence, start=0):
         return self._set_sequence(sequence, start=start, seq_slice=_RNA_SLICE, seq_count=4)
