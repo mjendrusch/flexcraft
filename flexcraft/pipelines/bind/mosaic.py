@@ -3,6 +3,7 @@
 
 import os
 import time
+import uuid
 import numpy as np
 import jax
 import haiku as hk
@@ -44,6 +45,8 @@ opt = parse_options(
     boltz_path="params/boltz/",
     target_path="target.pdb",
     target_sequence="none",
+    target_template="none",
+    predict_template="False",
     off_target_sequence="none",
     hotspots="none",
     target_chains="all",
@@ -58,10 +61,15 @@ opt = parse_options(
     repeat=1,
     temperature=0.1,
     samples=10,
-    seed=42
+    seed=42,
+    tmpdir="tmp/"
 )
 
 binder_length = opt.length
+target_template = opt.target_template
+if target_template == "none" and opt.predict_template == "True":
+    os.makedirs(opt.tmpdir, exist_ok=True)
+    target_template = f"{opt.tmpdir}/target_{str(uuid.uuid4())}.cif"
 key = Keygen(opt.seed)
 kval = key()
 # set up protein mpnn
@@ -122,12 +130,36 @@ if opt.off_target_sequence != "none":
     off_target_sequence = opt.off_target_sequence.strip()
 # set up Boltz models
 model = Joltz2(cache=opt.boltz_path)
+# full-atom predictor with context
+joltz_pred = model.predictor(num_recycle=4)
+# if applicable, predict & save a template structure
+if opt.predict_template == "True":
+    prediction = joltz_pred(key(), JoltzSpec().add_protein(
+        *[c for c in target_sequence.split(":")], use_msa=True))
+    prediction.save_cif(target_template)
 # unknown-aa hallucination model
 if opt.hallucination_model == "joltz":
     joltz, joltz_params = model.evaluator(num_recycle=4)
-    joltz_spec = (JoltzSpec()
-        .add_protein("X" * binder_length)
-        .add_protein(*[c for c in target_sequence.split(":")], use_msa=True))
+    if opt.target_template != "none":
+        joltz_spec = (
+            # start with empty spec
+            JoltzSpec()
+            # add a designable binder (all-X sequence), not generating MSA
+            .add_protein("X" * binder_length)
+            # add all target chains, generating MSA
+            .add_protein(*[c for c in target_sequence.split(":")], use_msa=False)
+            # add input template structure
+            .add_template(target_template, to_chains=[
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[i]
+                for i, _ in enumerate(target_sequence.split(":"))]))
+    else:
+        joltz_spec = (
+            # start with empty spec
+            JoltzSpec()
+            # add a designable binder (all-X sequence), not generating MSA
+            .add_protein("X" * binder_length)
+            # add all target chains, generating MSA
+            .add_protein(*[c for c in target_sequence.split(":")], use_msa=True))
     joltz_input, writer = joltz_spec.to_input(pad=False)
     params["joltz"] = joltz_params
     params["joltz_input"] = joltz_input
@@ -153,8 +185,6 @@ elif opt.hallucination_model == "af2":
     af_template_data = AFInput.from_data(design_data).add_template(
         design_data, where=is_target)
     params["af2"] = af2_params
-# full-atom predictor with context
-joltz_pred = model.predictor(num_recycle=4)
 
 def batch_mpnn(mpnn):
     def _mpnn_map(params, key, data):
