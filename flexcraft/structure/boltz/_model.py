@@ -335,39 +335,19 @@ class Joltz2:
         self.model = load_boltz2(model=model, cache=cache)
         self.model_jit = jax.jit(self.model)
 
-    def evaluator(self, num_recycle=4, num_sampling_steps=25, deterministic=False):
+    def evaluator(self, num_recycle=4, num_sampling_steps=25,
+                  deterministic=False, stop_recycle_gradient=True):
         evaluator = Joltz2Evaluator(
             joltz=self.model,
             num_recycle=num_recycle,
             num_sampling_steps=num_sampling_steps,
-            deterministic=deterministic)
+            deterministic=deterministic,
+            stop_recycle_gradient=stop_recycle_gradient)
         # return evaluator
         evaluator_params, evaluator_static = eqx.partition(evaluator, eqx.is_array)
         def _evaluator(params):
             return eqx.combine(params, evaluator_static)
         return _evaluator, evaluator_params
-
-    # def predictor_adhoc(self, num_recycle=2, num_samples=1,
-    #                     num_sampling_steps=25, deterministic=False):
-    #     jit_predict = eqx.filter_jit(Joltz2Evaluator(
-    #         joltz=self.model,
-    #         num_recycle=num_recycle,
-    #         num_sampling_steps=num_sampling_steps,
-    #         deterministic=deterministic)._predict)
-    #     def _predict(key, *chains, aa=None):
-    #         features, writer_spec = make_features(chains, cache=self.cache)
-    #         features = pad_boltz_atom_features_for_compilation(features)
-    #         writer_features = {
-    #             k: torch.tensor(np.array(v))
-    #             for k, v in features.items() if k != "record"
-    #         }
-    #         writer_features["record"] = writer_spec["features_dict"]["record"]
-    #         writer_spec["features_dict"] = writer_features
-    #         features = jax.tree.map(jnp.array, features)
-    #         prediction = jit_predict(key, features, num_samples=num_samples)
-    #         return JoltzPrediction(data=prediction.data,
-    #                                writer=Joltz2Writer(**writer_spec))
-    #     return _predict
 
     def predictor(self, num_recycle=2, num_samples=1,
                   num_sampling_steps=25, deterministic=False):
@@ -395,6 +375,7 @@ class Joltz2Evaluator(eqx.Module):
     num_recycle: int = 3
     num_sampling_steps: int = 25
     deterministic: bool = False
+    stop_recycle_gradient: bool = True
 
     def initial_embedding(self, features):
         return self.joltz.embed_inputs(features)
@@ -402,7 +383,9 @@ class Joltz2Evaluator(eqx.Module):
     def trunk(self, base_key, features, embedding):
         def body_fn(carry, _):
             trunk_state, key = carry
-            trunk_state = jax.tree.map(jax.lax.stop_gradient, trunk_state)
+            if self.stop_recycle_gradient:
+                trunk_state = jax.tree.map(jax.lax.stop_gradient, trunk_state)
+            
             trunk_state, key = self.joltz.trunk_iteration(
                 trunk_state,
                 embedding,
@@ -417,6 +400,8 @@ class Joltz2Evaluator(eqx.Module):
             z=jnp.zeros_like(embedding.z_init),
         )
 
+        if self.stop_recycle_gradient:
+            body_fn = jax.remat(body_fn)
         (final_state, _), _ = jax.lax.scan(
             body_fn,
             (state, base_key),
