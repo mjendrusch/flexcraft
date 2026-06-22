@@ -150,7 +150,7 @@ if opt.hallucination_model == "joltz":
             .add_protein(*[c for c in target_sequence.split(":")], use_msa=False)
             # add input template structure
             .add_template(target_template, to_chains=[
-                "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[i]
+                "BCDEFGHIJKLMNOPQRSTUVWXYZ"[i]
                 for i, _ in enumerate(target_sequence.split(":"))]))
     else:
         joltz_spec = (
