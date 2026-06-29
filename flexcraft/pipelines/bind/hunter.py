@@ -19,17 +19,17 @@ from flexcraft.sequence.sample import *
 from flexcraft.data.data import DesignData
 from flexcraft.sequence.mpnn import make_pmpnn
 import flexcraft.sequence.aa_codes as aas
-from flexcraft.hallucination.opt import jit_loss_update, simplex_agpm
 from flexcraft.structure.boltz._model import Joltz2, JoltzResult, Joltz2Writer
 from flexcraft.structure.boltz._data import JoltzSpec, JoltzInput
 from flexcraft.structure.boltz._result import JoltzPrediction
 from flexcraft.structure.af import AFInput, AFResult, make_af2, make_predict
-from flexcraft.files.csv import ScoreCSV
+from flexcraft.files import FastaFile, ScoreCSV
 
 opt = parse_options(
     "predict structures with AlphaFold",
     pmpnn_path="params/solmpnn/v_48_030.pkl",
     target_sequence="none",
+    name="target",
     use_msa="True",
     out_path="out",
     boltz_path="params/boltz/",
@@ -54,16 +54,16 @@ transform = lambda T: transform_logits((
     norm_logits
 ))
 # retrieve target
-target_sequence = opt.target_sequence
-# set up optional template
-target_template = None
-if opt.use_msa == "False":
-    os.makedirs(opt.tmpdir, exist_ok=True)
-    target_template = f"{opt.tmpdir}/target_{str(uuid.uuid4())}.cif"
+target_sequence: str = opt.target_sequence
+if target_sequence.endswith((".fa", ".fasta")):
+    sequences = FastaFile(target_sequence).line_dict
+else:
+    sequences = {opt.name: target_sequence}
 # set up Boltz models
 model = Joltz2()
 # unknown-aa hallucination model
 joltz, joltz_params = model.evaluator(num_recycle=4)
+joltz_pred = model.predictor(num_recycle=4)
 init_input, writer = (JoltzSpec()
     .add_protein("X" * binder_length)
     .add_protein(*[c for c in target_sequence.split(":")], use_msa=True).to_input(pad=True, cache=opt.boltz_path))
@@ -91,7 +91,8 @@ def protein_hunter(key, cycles=5):
         pmpnn_result = data.update(
             aa=aas.translate(pmpnn_result["aa"], aas.PMPNN_CODE, aas.AF2_CODE))
         return pmpnn_result.to_sequence_string().split(":")[0]
-    def _inner(binder_length: int, template=None, use_msa=True, report=None) -> JoltzResult:
+    def _inner(target_sequence: str, binder_length: int,
+               template=None, use_msa=True, report=None) -> JoltzResult:
         spec = (
             JoltzSpec()
             .add_protein(binder_length * "X")
@@ -134,14 +135,15 @@ def protein_hunter(key, cycles=5):
     return _inner
 
 def _report_trajectory(index: int, writer: ScoreCSV, start_step=0):
-    def _report(step: int, sequence: str, pred: JoltzPrediction):
+    def _report(target: str, step: int, sequence: str, pred: JoltzPrediction):
         result = pred.result
         line_info = dict(
+            target=target,
             attempt=index, step=start_step + step,
             sequence=sequence,
             plddt=result.plddt[:binder_length].mean(),
             iptm=result.iptm)
-        pred.save_pdb(f"{opt.out_path}/attempts/design_{index}_{step}.pdb")
+        pred.save_pdb(f"{opt.out_path}/attempts/{target}_{index}_{step}.pdb")
         writer.write_line(line_info)
     return _report
 
@@ -155,22 +157,29 @@ common_keys = [
     "iptm",
 ]
 trajectory_keys = [k for k in common_keys]
-trajectory = ScoreCSV(f"{opt.out_path}/trajectory.csv", keys=["attempt", "step"] + trajectory_keys)
-results_keys = [
-    "attempt", "stage", "sequence"
-] + common_keys
+trajectory = ScoreCSV(f"{opt.out_path}/trajectory.csv", keys=["target", "attempt", "step"] + trajectory_keys)
 
 hunter = protein_hunter(key, cycles=opt.cycles)
-success_count = 0
-attempt = 0
-_attempt = 0
-while success_count < opt.num_designs:
-    attempt = _attempt
-    _attempt += 1
+for name, sequence in sequences.items():
+    # set up optional template
+    target_template = None
+    if opt.use_msa == "False":
+        os.makedirs(opt.tmpdir, exist_ok=True)
+        target_template = f"{opt.tmpdir}/target_{str(uuid.uuid4())}.cif"
+        prediction = joltz_pred(key(), JoltzSpec().add_protein(
+            *[c for c in sequence.split(":")], use_msa=True))
+        prediction.save_cif(target_template)
+    success_count = 0
+    attempt = 0
+    _attempt = 0
+    while success_count < opt.num_designs:
+        attempt = _attempt
+        _attempt += 1
 
-    prediction = hunter(
-        binder_length,
-        use_msa=opt.use_msa == "True",
-        template=target_template,
-        report=_report_trajectory(attempt, trajectory))
-    success_count += 1
+        prediction = hunter(
+            sequence,
+            binder_length,
+            use_msa=opt.use_msa == "True",
+            template=target_template,
+            report=_report_trajectory(name, attempt, trajectory))
+        success_count += 1

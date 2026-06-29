@@ -219,6 +219,7 @@ def metrics(sequence, key, result: JoltzResult):
     center = logits.mean(axis=0)
     logits = logits - center
     prob = jax.lax.stop_gradient(jax.nn.softmax(logits.at[:, aas.AF2_CODE.index("C")].set(-1e6) / 0.1, axis=-1))
+    entropy = -(logits * prob).sum(axis=-1).mean()
     # losses
     plddt = result.plddt
     pae = 32 * result.pae # unnormalized pAE
@@ -242,6 +243,7 @@ def metrics(sequence, key, result: JoltzResult):
         binder_target_contacts = hotspot_contacts
     return dict(
         logits = logits,
+        entropy = entropy,
         plddt = plddt[:binder_length].mean(),
         recovery = (sequence * prob).sum(axis=-1).mean(),
         binder_target_contacts = binder_target_contacts,
@@ -388,6 +390,7 @@ common_keys = [
     "eptm",
     "ipsae",
     "average_num_nonzero",
+    "entropy",
     "L", "H", "E"
 ]
 trajectory_keys = [k for k in common_keys]
