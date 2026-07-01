@@ -2,7 +2,7 @@
 import shutil
 import gemmi
 from tempfile import NamedTemporaryFile
-from typing import Any, Literal, List
+from typing import Any, Literal, List, Tuple
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -86,6 +86,7 @@ class JoltzSpec:
         self.templates = templates or list()
         self.constraints = constraints or list()
         self.temporaries = list()
+        self.precomputed_msas = list()
 
     def add_chain(self, *chains):
         _chains = []
@@ -199,6 +200,15 @@ class JoltzSpec:
                 self.chains[c]["use_msa"] = True
         return self
 
+    def precomputed_msa(self, path, start_chain=0):
+        offset = 0
+        for chain in self.chains[:start_chain]:
+            offset += len(chain["sequence"]) * chain.get("num_repeats", 1)
+        self.precomputed_msas.append(dict(path=path, offset=offset))
+        for chain in self.chains:
+            chain["use_msa"] = False
+        return self
+
     def add_bond(self, chain_1, residue_1, atom_1,
                  chain_2, residue_2, atom_2):
         self.constraints.append(dict(
@@ -235,9 +245,21 @@ class JoltzSpec:
         features = jax.tree.map(jnp.array, features)
         return features, writer_spec
 
-    def to_input(self, pad=True, cache="./params/boltz/") -> "JoltzInput":
+    def to_input(self, pad=True, cache="./params/boltz/") -> Tuple["JoltzInput", "Joltz2Writer"]:
+        if self.precomputed_msas:
+            for chain in self.chains:
+                chain["use_msa"] = False
         features, writer_spec = self.to_features(pad=pad, cache=cache)
-        return JoltzInput(features=features), Joltz2Writer(**writer_spec)
+        joltz_input = JoltzInput(features=features)
+        if self.precomputed_msas:
+            for msa in self.precomputed_msas:
+                joltz_input = joltz_input.load_msa(msa["path"], msa["offset"])
+        joltz_writer = Joltz2Writer(**writer_spec)
+        return joltz_input, joltz_writer
+
+    def save_msa(self, path: str, cache="./params/boltz/"):
+        joltz_input, _ = self.to_input(pad=False, cache=cache)
+        joltz_input.save_msa(path)
 
 _AA_SLICE = slice(2, 22)
 _AA_UNK = 22
@@ -258,39 +280,47 @@ class JoltzInput(eqx.Module):
     def residue_type(self):
         return jnp.argmax(self.features["res_type"][0], axis=-1)
 
+    def copy(self):
+        result = JoltzInput(features={k: v for k, v in self.features.items()})
+        return result
+
     def _set_res_type(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20):
-        self.features["res_type"] = jnp.array(self.features["res_type"]).astype(jnp.float32)
-        self.features["res_type"] = self.features["res_type"].at[0, start:start + sequence.shape[0]].set(0.0)
-        self.features["res_type"] = self.features["res_type"].at[0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count])
-        return self
+        result = self.copy()
+        result.features["res_type"] = jnp.array(result.features["res_type"]).astype(jnp.float32)
+        result.features["res_type"] = result.features["res_type"].at[0, start:start + sequence.shape[0]].set(0.0)
+        result.features["res_type"] = result.features["res_type"].at[0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count])
+        return result
 
     def _set_profile(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20):
-        num_msa = self.features["msa"].shape[1]
-        self.features["profile"] = jnp.array(self.features["profile"]).astype(jnp.float32)
-        self.features["profile"] = self.features["profile"].at[0, start:start + sequence.shape[0]].set(0.0)
-        self.features["profile"] = self.features["profile"].at[0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count] / num_msa)
-        self.features["profile"] = self.features["profile"].at[0, start:start + sequence.shape[0], 1].set((num_msa - 1) / num_msa)
-        return self
+        result = self.copy()
+        num_msa = result.features["msa"].shape[1]
+        result.features["profile"] = jnp.array(result.features["profile"]).astype(jnp.float32)
+        result.features["profile"] = result.features["profile"].at[0, start:start + sequence.shape[0]].set(0.0)
+        result.features["profile"] = result.features["profile"].at[0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count] / num_msa)
+        result.features["profile"] = result.features["profile"].at[0, start:start + sequence.shape[0], 1].set((num_msa - 1) / num_msa)
+        return result
 
     def _set_msa(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20):
-        self.features["msa"] = jnp.array(self.features["msa"]).astype(jnp.float32)
+        result = self.copy()
+        result.features["msa"] = jnp.array(result.features["msa"]).astype(jnp.float32)
         # reset MSA for all positions we're setting:
         # setting all msa positions to zero
-        self.features["msa"] = self.features["msa"].at[0, :, start:start + sequence.shape[0]].set(0.0)
+        result.features["msa"] = result.features["msa"].at[0, :, start:start + sequence.shape[0]].set(0.0)
         # setting all msa positions from the 2nd sequence onwards to "-"
-        self.features["msa"] = self.features["msa"].at[0, 1:, start:start + sequence.shape[0], 1].set(1.0)
+        result.features["msa"] = result.features["msa"].at[0, 1:, start:start + sequence.shape[0], 1].set(1.0)
         # finally, setting the first sequence to the input sequence
-        self.features["msa"] = self.features["msa"].at[0, 0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count])
-        return self
+        result.features["msa"] = result.features["msa"].at[0, 0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count])
+        return result
 
     def _set_sequence(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20,
                       reset_msa=True, reset_profile=True):
-        self = self._set_res_type(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
+        result = self.copy()
+        result = result._set_res_type(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
         if reset_profile:
-            self = self._set_profile(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
+            result = result._set_profile(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
         if reset_msa:
-            self = self._set_msa(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
-        return self
+            result = result._set_msa(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
+        return result
 
     def set_aa(self, sequence, start=0, reset_msa=True, reset_profile=True):
         return self._set_sequence(sequence, start=start,
@@ -301,23 +331,66 @@ class JoltzInput(eqx.Module):
         self.features["msa"] = data.features["msa"]
         self.features["msa_mask"] = data.features["msa_mask"]
         self.features["profile"] = data.features["profile"]
+        self.features["deletion_mean"] = data.features["deletion_mean"]
         self.features["has_deletion"] = data.features["has_deletion"]
         self.features["deletion_value"] = data.features["deletion_value"]
         self.features["msa_paired"] = data.features["msa_paired"]
         return self
 
+    def save_msa(self, path: str) -> "JoltzInput":
+        np.savez_compressed(
+            path, 
+            msa = self.features["msa"],
+            msa_mask = self.features["msa_mask"],
+            profile = self.features["profile"],
+            has_deletion = self.features["has_deletion"],
+            deletion_value = self.features["deletion_value"],
+            deletion_mean = self.features["deletion_mean"],
+            msa_paired = self.features["msa_paired"])
+        return self
+
+    def load_msa(self, path: str, start=0, msa_start=0, msa_end=None) -> "JoltzInput":
+        msa_features = np.load(path)
+        result = self.copy()
+        msa_names = ["msa", "msa_mask", "msa_paired", "has_deletion", "deletion_value"]
+        # sequence_names = ["profile", "deletion_mean"]
+        msa = msa_features["msa"]
+        msa_length = msa[:, :, msa_start:msa_end].shape[2]
+        sequence_count = msa.shape[1]
+        current_sequence_count = self.features["msa"].shape[1]
+        # pad current features to number of msa sequences
+        for name in msa_names:
+            if sequence_count > current_sequence_count:
+                difference = sequence_count - current_sequence_count
+                padding = jnp.zeros(
+                    [1, difference] + list(result.features[name].shape[2:]),
+                    dtype=result.features[name].dtype)
+                # make padded msa all gaps
+                if name == "msa":
+                    padding = padding.at[..., 1].set(1)
+                # adjust msa mask
+                if name == "msa_mask":
+                    padding = padding.at[0].set(msa_features["msa_mask"][0, -difference:, 0:1])
+                result.features[name] = jnp.concatenate(
+                    (result.features[name], padding), axis=1)
+            result.features[name] = result.features[name].at[0, :, start:start + msa_length].set(msa_features[name][0, :, msa_start:msa_end])
+        result.features["profile"] = result.features["msa"].mean(axis=1)
+        result.features["deletion_mean"] = result.features["deletion_value"].mean(axis=1)
+        return result
+
     def set_msa(self, msa, start=0):
-        self.features["msa"] = jnp.array(self.features["msa"]).astype(jnp.float32)
+        result = self.copy()
+        result.features["msa"] = jnp.array(result.features["msa"]).astype(jnp.float32)
         # reset MSA for all positions we're setting:
         # setting all msa positions to zero
-        self.features["msa"] = self.features["msa"].at[0, :, start:start + msa.shape[1]].set(0.0)
+        result.features["msa"] = result.features["msa"].at[0, :, start:start + msa.shape[1]].set(0.0)
         # setting all msa positions from the 2nd sequence onwards to "-"
-        self.features["msa"] = self.features["msa"].at[0, 1:, start:start + msa.shape[1], 1].set(1.0)
+        result.features["msa"] = result.features["msa"].at[0, 1:, start:start + msa.shape[1], 1].set(1.0)
         # finally, setting the first sequence to the input sequence
-        self.features["msa"] = self.features["msa"].at[0, 0:msa.shape[0], start:start + msa.shape[1], :].set(msa)
+        result.features["msa"] = result.features["msa"].at[0, 0:msa.shape[0], start:start + msa.shape[1], :].set(msa)
         # compute & set the profile
-        self.features["profile"] = self.features["msa"].at[0, start:start + msa.shape[1]].set(msa.mean(axis=0))
-        return self
+        result.features["profile"] = result.features["msa"].at[0, start:start + msa.shape[1]].set(msa.mean(axis=0))
+        return result
 
     def set_aa_msa(self, msa, start=0):
         if msa.shape[-1] == 20:

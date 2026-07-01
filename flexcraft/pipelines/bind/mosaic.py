@@ -3,6 +3,7 @@
 
 import os
 import time
+import hashlib
 import uuid
 import numpy as np
 import jax
@@ -47,6 +48,8 @@ opt = parse_options(
     target_sequence="none",
     target_template="none",
     predict_template="False",
+    target_msa="none",
+    predict_msa="False",
     off_target_sequence="none",
     hotspots="none",
     target_chains="all",
@@ -67,9 +70,13 @@ opt = parse_options(
 
 binder_length = opt.length
 target_template = opt.target_template
+target_msa = opt.target_msa
 if target_template == "none" and opt.predict_template == "True":
     os.makedirs(opt.tmpdir, exist_ok=True)
     target_template = f"{opt.tmpdir}/target_{str(uuid.uuid4())}.cif"
+if target_msa == "none" and opt.predict_msa == "True":
+    os.makedirs(opt.tmpdir, exist_ok=True)
+    target_msa = f"{opt.tmpdir}/target_{hashlib.sha256(opt.target_sequence.encode('utf-8')).hexdigest()}.npz"
 key = Keygen(opt.seed)
 kval = key()
 # set up protein mpnn
@@ -132,7 +139,10 @@ if opt.off_target_sequence != "none":
 model = Joltz2(cache=opt.boltz_path)
 # full-atom predictor with context
 joltz_pred = model.predictor(num_recycle=4)
-# if applicable, predict & save a template structure
+# if applicable, predict & save a msa or template structure
+if opt.predict_msa == "True":
+    if not os.path.isfile(target_msa):
+        JoltzSpec().add_protein(*target_sequence.split(":"), use_msa=True).save_msa(target_msa, cache=opt.boltz_path)
 if opt.predict_template == "True":
     prediction = joltz_pred(key(), JoltzSpec().add_protein(
         *[c for c in target_sequence.split(":")], use_msa=True))
@@ -152,6 +162,16 @@ if opt.hallucination_model == "joltz":
             .add_template(target_template, to_chains=[
                 "BCDEFGHIJKLMNOPQRSTUVWXYZ"[i]
                 for i, _ in enumerate(target_sequence.split(":"))]))
+    if target_msa != "none":
+        joltz_spec = (
+            # start with empty spec
+            JoltzSpec()
+            # add a designable binder (all-X sequence), not generating MSA
+            .add_protein("X" * binder_length)
+            # add all target chains, generating MSA
+            .add_protein(*[c for c in target_sequence.split(":")], use_msa=False)
+            # add input msa
+            .precomputed_msa(target_msa, start_chain=1))
     else:
         joltz_spec = (
             # start with empty spec
@@ -219,7 +239,7 @@ def metrics(sequence, key, result: JoltzResult):
     center = logits.mean(axis=0)
     logits = logits - center
     prob = jax.lax.stop_gradient(jax.nn.softmax(logits.at[:, aas.AF2_CODE.index("C")].set(-1e6) / 0.1, axis=-1))
-    entropy = -(logits * prob).sum(axis=-1).mean()
+    entropy = -(jax.nn.log_softmax(logits, axis=-1) * prob).sum(axis=-1).mean()
     # losses
     plddt = result.plddt
     pae = 32 * result.pae # unnormalized pAE
@@ -447,11 +467,12 @@ while success_count < opt.num_designs:
     if opt.hallucination_model == "af2":
         result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_0.pdb")
     data = result.to_data()
-    prediction_1 = joltz_pred(
-        key(),
-        JoltzSpec()
+    spec = (JoltzSpec()
             .add_protein(data.to_sequence_string()[:binder_length])
             .add_protein(*[c for c in target_sequence.split(":")], use_msa=True))
+    if target_msa != "none":
+        spec = spec.precomputed_msa(target_msa, start_chain=1)
+    prediction_1 = joltz_pred(key(), spec)
     stage_1 = _report_result(attempt, "stage_1", key(), results, sequence, prediction_1.result)
     prediction_1.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_1.pdb")
     sequence = jnp.log(sequence + 1e-5)
@@ -470,11 +491,12 @@ while success_count < opt.num_designs:
     if opt.hallucination_model == "af2":
         result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_1.pdb")
     data = result.to_data()
-    prediction_2 = joltz_pred(
-        key(),
-        JoltzSpec()
+    spec = (JoltzSpec()
             .add_protein(data.to_sequence_string()[:binder_length])
             .add_protein(*[c for c in target_sequence.split(":")], use_msa=True))
+    if target_msa != "none":
+        spec = spec.precomputed_msa(target_msa, start_chain=1)
+    prediction_2 = joltz_pred(key(), spec)
     stage_2 = _report_result(attempt, "stage_2", key(), results, sequence, prediction_2.result)
     prediction_2.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_2.pdb")
     stage = "stage_2"

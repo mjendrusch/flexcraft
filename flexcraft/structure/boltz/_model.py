@@ -357,17 +357,17 @@ class Joltz2:
             num_sampling_steps=num_sampling_steps,
             deterministic=deterministic)._predict)
         def _predict(key, joltz_spec: JoltzSpec):
-            features, writer_spec = joltz_spec.to_features(pad=True, cache=self.cache)
-            writer_features = {
-                k: torch.tensor(np.array(v))
-                for k, v in features.items() if k != "record"
-            }
-            writer_features["record"] = writer_spec["features_dict"]["record"]
-            writer_spec["features_dict"] = writer_features
-            features = jax.tree.map(jnp.array, features)
-            prediction = jit_predict(key, features, num_samples=num_samples)
+            joltz_input, joltz_writer = joltz_spec.to_input(pad=True, cache=self.cache)
+            # writer_features = {
+            #     k: torch.tensor(np.array(v))
+            #     for k, v in features.items() if k != "record"
+            # }
+            # writer_features["record"] = writer_spec["features_dict"]["record"]
+            # writer_spec["features_dict"] = writer_features
+            #features = jax.tree.map(jnp.array, features)
+            prediction = jit_predict(key, joltz_input.features, num_samples=num_samples)
             return JoltzPrediction(data=prediction.data,
-                                   writer=Joltz2Writer(**writer_spec))
+                                   writer=joltz_writer)#Joltz2Writer(**writer_spec))
         return _predict
 
 class Joltz2Evaluator(eqx.Module):
