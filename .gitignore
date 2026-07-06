@@ -6,3 +6,7 @@ __pycache__/
 ._.DS_Store
 ._*
 flexcraft_params/
+params/
+dependencies/
+slurm/
+slurm-*.out
