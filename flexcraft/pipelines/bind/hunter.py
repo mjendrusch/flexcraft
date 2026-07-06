@@ -64,9 +64,6 @@ model = Joltz2()
 # unknown-aa hallucination model
 joltz, joltz_params = model.evaluator(num_recycle=4)
 joltz_pred = model.predictor(num_recycle=4)
-init_input, writer = (JoltzSpec()
-    .add_protein("X" * binder_length)
-    .add_protein(*[c for c in target_sequence.split(":")], use_msa=True).to_input(pad=True, cache=opt.boltz_path))
 params["joltz"] = joltz_params
 
 def _hunter_step(params, key, data: JoltzInput) -> JoltzResult:
@@ -91,7 +88,7 @@ def protein_hunter(key, cycles=5):
         pmpnn_result = data.update(
             aa=aas.translate(pmpnn_result["aa"], aas.PMPNN_CODE, aas.AF2_CODE))
         return pmpnn_result.to_sequence_string().split(":")[0]
-    def _inner(target_sequence: str, binder_length: int,
+    def _inner(target_sequence: str, binder_length: int, init_input=None,
                template=None, use_msa=True, report=None) -> JoltzResult:
         spec = (
             JoltzSpec()
@@ -134,8 +131,8 @@ def protein_hunter(key, cycles=5):
         return JoltzPrediction(data=result.data, writer=joltz_writer)
     return _inner
 
-def _report_trajectory(index: int, writer: ScoreCSV, start_step=0):
-    def _report(target: str, step: int, sequence: str, pred: JoltzPrediction):
+def _report_trajectory(target: str, index: int, writer: ScoreCSV, start_step=0):
+    def _report(step: int, sequence: str, pred: JoltzPrediction):
         result = pred.result
         line_info = dict(
             target=target,
@@ -157,13 +154,19 @@ common_keys = [
     "iptm",
 ]
 trajectory_keys = [k for k in common_keys]
-trajectory = ScoreCSV(f"{opt.out_path}/trajectory.csv", keys=["target", "attempt", "step"] + trajectory_keys)
+trajectory = ScoreCSV(f"{opt.out_path}/trajectory.csv", keys=["target"] + trajectory_keys)
 
 hunter = protein_hunter(key, cycles=opt.cycles)
 for name, sequence in sequences.items():
-    # set up optional template
+    # set up per-target MSA input (use_msa) or a predicted template (no MSA)
     target_template = None
-    if opt.use_msa == "False":
+    init_input = None
+    if opt.use_msa == "True":
+        init_input, _ = (JoltzSpec()
+            .add_protein("X" * binder_length)
+            .add_protein(*[c for c in sequence.split(":")], use_msa=True)
+            .to_input(pad=True, cache=opt.boltz_path))
+    else:
         os.makedirs(opt.tmpdir, exist_ok=True)
         target_template = f"{opt.tmpdir}/target_{str(uuid.uuid4())}.cif"
         prediction = joltz_pred(key(), JoltzSpec().add_protein(
@@ -179,6 +182,7 @@ for name, sequence in sequences.items():
         prediction = hunter(
             sequence,
             binder_length,
+            init_input=init_input,
             use_msa=opt.use_msa == "True",
             template=target_template,
             report=_report_trajectory(name, attempt, trajectory))
