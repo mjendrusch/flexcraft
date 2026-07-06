@@ -255,6 +255,38 @@ def extract_motif(pdbs, pdb_names: list, segment_defn):
         bundle=np.full((length,), segment_defn["bundle"], dtype=np.int32)
     )
 
+def prepare_peptide_segments(data):
+    segments = dict()
+    for name, segment_defn in data["segments"].items():
+        if "sequence" in segment_defn:
+            segment = extract_peptide_motif(segment_defn)
+        else:
+            segment = segment_defn
+        segments[name] = segment
+    return segments
+
+def extract_peptide_motif(segment_defn):
+    sequence = segment_defn["sequence"]
+    sequence = aas.encode(sequence, aas.AF2_CODE)
+    group = segment_defn["group"]
+    aatype = sequence
+    length = aatype.shape[0]
+    return dict(
+        has_motif = jnp.ones_like(sequence, dtype=jnp.bool_),
+        motif_aa = aatype,
+        pdb_index = jnp.zeros((length,), dtype=jnp.int32),
+        motif_chain_index = jnp.zeros((length,), dtype=jnp.int32),
+        motif = jnp.zeros((length, 14, 3), dtype=jnp.int32),
+        motif_mask = jnp.zeros((length, 14), dtype=jnp.bool_),
+        motif_dssp = jnp.zeros_like(aatype),
+        motif_group = jnp.full_like(aatype, group),
+        center = jnp.zeros((length, 3), dtype=jnp.float32),
+        center_group = jnp.zeros((length,), dtype=jnp.float32),
+        center_time = jnp.zeros((length,), dtype=jnp.float32),
+        use_center = jnp.zeros((length,), dtype=jnp.bool_),
+        bundle=jnp.full_like(aatype, 0, dtype=jnp.int32)
+    )
+
 def pad_to_budget(data, prev, assembly_budget):
     chain = data["chain_index"]
     chains = np.unique(chain)
@@ -413,6 +445,45 @@ def sample_data(salad_config, segments, assembly,
         "local": np.zeros((data["pos"].shape[0], salad_config.local_size), dtype=np.float32)
     }
     return data, init_prev
+
+def make_peptide_assembly(peptides, assembly_string):
+    """Make an assembly specification for scaffolding flexible peptides.
+    
+    Args:
+        peptides: list of peptide sequences to scaffold.
+        assembly_string: comma and colon-separated string specifying chains
+            and motif placement in the final scaffolded assembly.
+    """
+    assembly_string = assembly_string.strip()
+    assembly_string = assembly_string.replace(" ", "")
+    chains = assembly_string.split(":")
+    assembly = []
+    segments = dict()
+    segment_index = 0
+    for chain in chains:
+        chain_segments = chain.split(",")
+        chain_content = []
+        for seg in chain_segments:
+            seg: str
+            segment_name = f"segment_{segment_index}"
+            if seg[0] == "@":
+                group = int(seg[1:])
+                sequence = peptides[group]
+                segments[segment_name] = dict(
+                    sequence=sequence, group=group, bundle=0)
+            else:
+                if "-" in seg:
+                    min_length, max_length = list(map(int, seg.split("-")))
+                else:
+                    min_length = max_length = int(seg)
+                segments[segment_name] = dict(
+                    min_length=min_length, max_length=max_length, bundle=0)
+            chain_content.append(segment_name)
+            segment_index += 1
+        assembly.append(chain_content)
+    data = dict(segments=segments, assembly=assembly)
+    data["segments"] = prepare_peptide_segments(data)
+    return data
 
 def make_simple_assembly(pdb_path, assembly_string):
     assembly_string = assembly_string.strip()
