@@ -17,16 +17,15 @@ To install `flexcraft` and `salad`, simply clone this repository and follow the 
 # clone repository
 git clone https://github.com/mjendrusch/flexcraft.git
 # set up environment
-conda create -n flexcraft python=3.10
+conda create -n flexcraft python==3.12.0
 conda activate flexcraft
 # install flexcraft, salad & dependencies
 cd flexcraft
-pip install -e .
+pip install -e ".[joltz]" --extra-index-url https://download.pytorch.org/whl/cpu
 # download model parameters
 bash download_params.sh
 # optionally install PyRosetta
-pip install pyrosetta-installer
-python -c 'import pyrosetta_installer; pyrosetta_installer.install_pyrosetta()'
+pip install pyrosetta --find-links https://west.rosettacommons.org/pyrosetta/quarterly/release
 ```
 
 ### Getting your 1st protein

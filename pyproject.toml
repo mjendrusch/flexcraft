@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "flexcraft"
-version = "0.0.1"
+version = "0.0.2"
 description = "Glue code for plugging together different protein design models."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 keywords = ["protein", "machine learning", "jax"]
 authors = [{ name = "Michael A. Jendrusch", email = "michael.jendrusch@embl.de" }]
 maintainers = [{ name = "Michael A. Jendrusch", email = "michael.jendrusch@embl.de" }]
@@ -19,12 +19,14 @@ classifiers = [
 
 dependencies = [
     "salad @ git+https://github.com/mjendrusch/salad.git",
-    "ColabDesign @ git+https://github.com/sokrypton/ColabDesign.git"
+    "ml-collections>=1.1.0"
 ]
 
 [project.optional-dependencies]
 joltz = [
-    "joltz @ git+https://github.com/nboyd/joltz.git"
+    "joltz @ git+https://github.com/nboyd/joltz.git",
+    "torch>=2.3.1",
+    "equinox>=0.13.5",
 ]
 
 [project.urls]
