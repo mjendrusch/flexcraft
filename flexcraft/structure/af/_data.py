@@ -540,8 +540,12 @@ class AFResult:
     def distogram_bin_centers(self):
         return (self.distogram_bin_edges[1:] + self.distogram_bin_edges[:-1]) / 2
 
-    def to_data(self) -> DesignData:
-        """Convert an AFResult to DesignData."""
+    def to_data(self, return_samples=False) -> DesignData:
+        """Convert an AFResult to DesignData.
+
+        return_samples is accepted for compatibility with JoltzResult, but
+        ignored: AF2 returns a single structure, so there is no sample axis.
+        """
         atom14, mask14 = self.atom14
         return DesignData(data=dict(
             atom_positions=atom14,
@@ -660,8 +664,8 @@ class AFResult:
         """Save an AFResult as a compressed npz archive."""
         np.savez_compressed(
             path,
-            **{f"inputs_{k}": np.array(v) for k, v in self.inputs},
-            **{f"result_{k}": np.array(v) for k, v in self.result})
+            **{f"inputs_{k}": np.array(v) for k, v in self.inputs.items()},
+            **{f"result_{k}": np.array(v) for k, v in self.result.items()})
 
     def save_pdb(self, path):
         """Save an AFResult in PDB format at `path`."""
