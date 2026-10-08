@@ -125,6 +125,7 @@ if sample_structure:
 # hotspot index
 hotspot_index = _parse_hotspots(opt.hotspots, binder_length = binder_length)
 # retrieve target
+target = None
 if opt.target_sequence != "none":
     target_sequence = opt.target_sequence
 else:
@@ -151,6 +152,7 @@ if opt.predict_template == "True":
         *[c for c in target_sequence.split(":")], use_msa=True))
     prediction.save_cif(target_template)
 # unknown-aa hallucination model
+joltz_off = None
 if opt.hallucination_model == "joltz":
     joltz, joltz_params = model.evaluator(num_recycle=4)
     if target_template != "none":
@@ -186,7 +188,6 @@ if opt.hallucination_model == "joltz":
     joltz_input, writer = joltz_spec.to_input(pad=False)
     params["joltz"] = joltz_params
     params["joltz_input"] = joltz_input
-    joltz_off = None
     if off_target_sequence is not None:
         off_input, _ = (JoltzSpec()
             .add_protein("X" * binder_length)
@@ -203,6 +204,18 @@ elif opt.hallucination_model == "af2":
     config.model.global_config.use_dgram = False
     config.model.global_config.use_remat = True
     af2 = make_predict(make_af2(config), num_recycle=2)
+    if target is None:
+        # AF2 templates the target from coordinates, but --target_sequence only
+        # provides a string. Predict the target with Boltz and template from
+        # that, the way flexcraft/pipelines/bind/hal/af2.py does. Reuses the
+        # --predict_template prediction when there is one.
+        if opt.predict_template != "True":
+            prediction = joltz_pred(key(), JoltzSpec().add_protein(
+                *[c for c in target_sequence.split(":")], use_msa=True))
+        os.makedirs(opt.tmpdir, exist_ok=True)
+        target_pdb = f"{opt.tmpdir}/target_{str(uuid.uuid4())}.pdb"
+        prediction.save_pdb(target_pdb)
+        target = load_pdb(target_pdb)
     design_data = DesignData.concatenate((DesignData.from_length(binder_length), target))
     is_target = jnp.zeros_like(design_data["mask"]).at[binder_length:].set(True)
     af_template_data = AFInput.from_data(design_data).add_template(
@@ -356,10 +369,10 @@ def loss(sequence, key=kval, context=None, params=None):
     # forbid cysteines
     sequence = sequence.at[:, aas.AF2_CODE.index("C")].set(0.0)
     sequence = sequence / sequence.sum(axis=1, keepdims=True)
-    # set sequence
-    joltz_input: JoltzInput = params["joltz_input"].set_aa(sequence)
     # predict structure
     if "joltz" in params:
+        # set sequence
+        joltz_input: JoltzInput = params["joltz_input"].set_aa(sequence)
         result: JoltzResult = joltz(params["joltz"]).predict(keys[0], joltz_input, num_samples=4)
         # res_data = result.to_data(return_samples=True)
     elif "af2" in params:
