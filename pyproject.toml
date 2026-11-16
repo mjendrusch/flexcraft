@@ -30,6 +30,11 @@ joltz = [
     "torch>=2.3.1",
     "equinox>=0.13.5",
 ]
+esmfold2 = [
+    # esm pins torch to 2.11.x; install the CPU wheel first, since all inference
+    # runs in JAX and torch is only used to featurize and convert the checkpoint
+    "esmjfold2 @ git+https://github.com/escalante-bio/esmjfold2.git",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/mjendrusch/flexcraft"
