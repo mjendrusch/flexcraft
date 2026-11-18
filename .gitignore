@@ -13,3 +13,4 @@ params/
 dependencies/
 slurm/
 slurm-*.out
+uv.lock
