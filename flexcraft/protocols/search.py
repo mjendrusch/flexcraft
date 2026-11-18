@@ -136,6 +136,25 @@ def salad_proposal(salad_config, salad_params, pmpnn, keygen, step, **kwargs):
         return salad_design
     return _proposal
 
+def _set_binary_binder_asym_id(af_result: AFResult, is_binder: jnp.ndarray) -> jnp.ndarray:
+    """Assign target=0, binder=1, padded=-1 in `af_result.inputs['asym_id']`."""
+    pad_mask = jnp.asarray(af_result.token_pad_mask, dtype=jnp.bool_)
+    is_binder_arr = jnp.asarray(is_binder, dtype=jnp.bool_)
+    if is_binder_arr.shape[0] < pad_mask.shape[0]:
+        is_binder_arr = jnp.pad(
+            is_binder_arr,
+            (0, pad_mask.shape[0] - is_binder_arr.shape[0]),
+            constant_values=False,
+        )
+    valid_binder = is_binder_arr & pad_mask
+    binary_asym_id = jnp.where(pad_mask, valid_binder.astype(jnp.int32), -1)
+    af_result.inputs = dict(af_result.inputs)
+    af_result.inputs["asym_id"] = binary_asym_id
+    if "chain_index" in af_result.inputs:
+        af_result.inputs["chain_index"] = binary_asym_id
+    return valid_binder
+
+
 def genetic_binder_fitness(af2, af_params, keygen):
     def _inner(design):
         is_target = design["is_target"] > 0
@@ -147,13 +166,16 @@ def genetic_binder_fitness(af2, af_params, keygen):
             .add_guess(data)
             .add_template(data, where=is_target)
         )
-        num_chains = len(np.unique(design["chain_index"]))
+        valid_chains = np.asarray(design["chain_index"])
+        valid_chains = valid_chains[valid_chains >= 0]
+        num_chains = max(1, len(np.unique(valid_chains)))
         af_input = af_input.block_diagonal(num_sequences=num_chains)
         af_result: AFResult = af2(af_params, keygen(), af_input)
-        af_result.inputs["chain_index"] = is_binder.astype(jnp.int32)
+        valid_binder = _set_binary_binder_asym_id(af_result, is_binder)
         fitness = af_result.ipae
-        success = (af_result.ipae <= 0.2) * (af_result.plddt[is_binder].mean() > 0.8)
-        result = af_result.to_data()
+        binder_plddt = (af_result.plddt * valid_binder).sum() / jnp.maximum(valid_binder.sum(), 1)
+        success = (af_result.ipae <= 0.2) * (binder_plddt > 0.8)
+        result = af_result.unpad().to_data()
         print(fitness, result.to_sequence_string().split(":")[-1])
         return fitness, success, result
     return _inner
@@ -177,13 +199,16 @@ def binder_fitness(pmpnn, transform, af2, af_params, key):
             .add_guess(pmpnn_result)
             .add_template(pmpnn_result, where=is_target)
         )
-        num_chains = len(np.unique(design["chain_index"]))
+        valid_chains = np.asarray(design["chain_index"])
+        valid_chains = valid_chains[valid_chains >= 0]
+        num_chains = max(1, len(np.unique(valid_chains)))
         af_input = af_input.block_diagonal(num_sequences=num_chains)
         af_result: AFResult = af2(af_params, key(), af_input)
-        af_result.inputs["chain_index"] = is_binder.astype(jnp.int32)
+        valid_binder = _set_binary_binder_asym_id(af_result, is_binder)
         fitness = af_result.ipae
-        success = (af_result.ipae <= 0.25) * (af_result.plddt[is_binder].mean() > 0.8)
-        result = af_result.to_data()
+        binder_plddt = (af_result.plddt * valid_binder).sum() / jnp.maximum(valid_binder.sum(), 1)
+        success = (af_result.ipae <= 0.25) * (binder_plddt > 0.8)
+        result = af_result.unpad().to_data()
         print(fitness, result.to_sequence_string().split(":")[-1])
-        return fitness, success, af_result.to_data()
+        return fitness, success, result
     return _inner

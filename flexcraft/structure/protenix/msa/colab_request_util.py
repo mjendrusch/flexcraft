@@ -25,8 +25,8 @@ from tqdm import tqdm
 TQDM_BAR_FORMAT = "{l_bar}{bar}| {n_fmt}/{total_fmt} [elapsed: {elapsed} estimate remaining: {remaining}]"
 logger = logging.getLogger(__name__)
 
-username = "example_user"
-password = "example_password"
+username = os.environ.get("PROTENIX_MSA_USERNAME", "")
+password = os.environ.get("PROTENIX_MSA_PASSWORD", "")
 
 
 def parse_fasta_string(fasta_string: str) -> Dict:

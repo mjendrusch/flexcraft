@@ -1,84 +1,129 @@
-import equinox as eqx
+"""Model-agnostic wrapper and input specification for structure predictors."""
 
-from flexcraft.structure.common._data import InputSpec
+from __future__ import annotations
 
-from flexcraft.structure.protenix._data import ProtenixInput, ProtenixSpec
-from flexcraft.structure.protenix._result import ProtenixResult, ProtenixPrediction
-from flexcraft.structure.protenix._model import Protenix
+from copy import copy
+from typing import TYPE_CHECKING, Any
 
-from flexcraft.structure.boltz._model import Joltz2
-from flexcraft.structure.boltz._data import JoltzSpec, JoltzInput
-from flexcraft.structure.boltz._result import JoltzResult
+from flexcraft.structure.common._data import InputSpec, ModelInput
 
-from flexcraft.structure.esmfold2._data import ESMFold2Input, ESMFold2Spec
-from flexcraft.structure.esmfold2._result import ESMFold2Result
-from flexcraft.structure.esmfold2._model import ESMFold2
+if TYPE_CHECKING:
+    from flexcraft.structure.af import AFInput, AFResult
+    from flexcraft.structure.boltz._data import JoltzInput
+    from flexcraft.structure.boltz._result import JoltzResult
+    from flexcraft.structure.esmfold2._data import ESMFold2Input
+    from flexcraft.structure.esmfold2._result import ESMFold2Result
+    from flexcraft.structure.protenix._data import ProtenixInput
+    from flexcraft.structure.protenix._result import ProtenixResult
 
-from flexcraft.structure.af import AF2Spec, AFWrapper, AFResult, AFInput
+    AF3LikeResult = ProtenixResult | JoltzResult | ESMFold2Result | AFResult
+    AF3LikeInput = ProtenixInput | JoltzInput | ESMFold2Input | AFInput
 
-CONCRETE_SPEC = dict(
-    joltz=JoltzSpec,
-    protenix=ProtenixSpec,
-    esmfold2=ESMFold2Spec,
-    af2=AF2Spec
-)
 
-AF3LikeResult = ProtenixResult | JoltzResult | ESMFold2Result | AFResult
-AF3LikeInput = ProtenixInput | JoltzInput | ESMFold2Input | AFInput
-
-def _any_spec_to_model_spec(spec: InputSpec, kind):
-    return CONCRETE_SPEC[kind](
-        *spec.chains,
-        templates=spec.templates,
-        constraints=spec.constraints
+def _get_model_kind(model: str) -> str:
+    """Resolve predictor backend kind from a model name string."""
+    if model == "joltz" or model.startswith("joltz"):
+        return "joltz"
+    if model.startswith("protenix"):
+        return "protenix"
+    if model.startswith("esmfold2"):
+        return "esmfold2"
+    if model.startswith("af2"):
+        return "af2"
+    raise ValueError(
+        f"Unsupported AF3Like model {model!r}. "
+        "Expected 'joltz', 'protenix_*', 'esmfold2_*', or 'af2_*'."
     )
 
-def _get_model_kind(model: str):
-    model_kind = None
-    if model == "joltz":
-        model_kind = "joltz"
-    elif model.startswith("protenix"):
-        model_kind = "protenix"
-    elif model.startswith("esmfold2"):
-        model_kind = "esmfold2"
-    elif model.startswith("af2"):
-        model_kind = "af2"
-    return model_kind
+
+def _get_model_spec_cls(kind: str) -> type[InputSpec]:
+    """Lazily import and return the InputSpec subclass for `kind`."""
+    if kind == "joltz":
+        from flexcraft.structure.boltz._data import JoltzSpec
+
+        return JoltzSpec
+    if kind == "protenix":
+        from flexcraft.structure.protenix._data import ProtenixSpec
+
+        return ProtenixSpec
+    if kind == "esmfold2":
+        from flexcraft.structure.esmfold2._data import ESMFold2Spec
+
+        return ESMFold2Spec
+    if kind == "af2":
+        from flexcraft.structure.af import AF2Spec
+
+        return AF2Spec
+    raise ValueError(f"Unknown model kind {kind!r}.")
+
+
+def _any_spec_to_model_spec(spec: InputSpec, kind: str) -> InputSpec:
+    """Convert any InputSpec into the backend-specific InputSpec for `kind`."""
+    spec_cls = _get_model_spec_cls(kind)
+    model_spec = spec_cls(
+        *copy(spec.chains),
+        templates=copy(spec.templates),
+        constraints=copy(spec.constraints),
+    )
+    for attr_name in ("precomputed_msas", "temporaries", "_pad_spec"):
+        attr_value = getattr(spec, attr_name, None)
+        if attr_value is not None:
+            setattr(model_spec, attr_name, copy(attr_value))
+    return model_spec
+
 
 class AF3LikeSpec(InputSpec):
-    def to_input(self, model="joltz", **kwargs):
+    """Backend-agnostic InputSpec dispatching to the requested predictor."""
+
+    def to_features(self, model: str = "joltz", **kwargs) -> dict:
+        model_kind = _get_model_kind(model)
+        return _any_spec_to_model_spec(self, model_kind).to_features(**kwargs)
+
+    def to_input(self, model: str = "joltz", **kwargs):
         model_kind = _get_model_kind(model)
         return _any_spec_to_model_spec(self, model_kind).to_input(**kwargs)
 
+
 class AF3Like:
-    def __init__(self, model="protenix_base_default_v1.0.0", **kwargs):
-        """Model-agnostic AF3-like model wrapper.
-        
+    """Model-agnostic wrapper across Joltz2, Protenix, ESMFold2, and AF2."""
+
+    def __init__(self, model: str = "protenix_base_default_v1.0.0", **kwargs):
+        """Initialize the requested predictor backend lazily.
+
         Args:
-            model (str): string model name (protenix_*, joltz, esmfold2_*, af2_*).
-            kwargs: model keyword arguments, e.g. cache dir.
+            model: Predictor identifier (`joltz`, `protenix_*`, `esmfold2_*`, `af2_*`).
+            **kwargs: Backend keyword arguments (e.g. `cache`, `load_esmc`).
         """
-        self.base = None
-        self.model_kind = None
-        if model == "joltz":
-            self.model_kind = "joltz"
+        self.model_kind = _get_model_kind(model)
+        if self.model_kind == "joltz":
+            from flexcraft.structure.boltz._model import Joltz2
+
             self.base = Joltz2(**kwargs)
-        elif model.startswith("protenix"):
-            self.model_kind = "protenix"
-            self.base = Protenix(model = model)
-        elif model.startswith("esmfold2"):
-            self.model_kind = "esmfold2"
-            self.base = ESMFold2(model = model, **kwargs)
-        elif model.startswith("af2"):
-            self.model_kind = "af2"
-            self.base = AFWrapper(model = model)
+        elif self.model_kind == "protenix":
+            from flexcraft.structure.protenix._model import Protenix
+
+            self.base = Protenix(model=model, **kwargs)
+        elif self.model_kind == "esmfold2":
+            from flexcraft.structure.esmfold2._model import ESMFold2
+
+            self.base = ESMFold2(model=model, **kwargs)
+        elif self.model_kind == "af2":
+            from flexcraft.structure.af import AFWrapper
+
+            self.base = AFWrapper(model=model, **kwargs)
 
     def predictor(self, **kwargs):
+        """Return an eager predictor accepting an InputSpec, ModelInput, or AFInput."""
         _predictor = self.base.predictor(**kwargs)
-        def _wrapper(key, any_spec: InputSpec):
-            spec = _any_spec_to_model_spec(any_spec, self.model_kind)
-            return _predictor(key, spec)
+
+        def _wrapper(key, any_spec: InputSpec | ModelInput | Any, **call_kwargs):
+            if isinstance(any_spec, InputSpec):
+                spec = _any_spec_to_model_spec(any_spec, self.model_kind)
+                return _predictor(key, spec, **call_kwargs)
+            return _predictor(key, any_spec, **call_kwargs)
+
         return _wrapper
 
     def evaluator(self, **kwargs):
+        """Return the underlying JIT-compatible evaluator for this backend."""
         return self.base.evaluator(**kwargs)

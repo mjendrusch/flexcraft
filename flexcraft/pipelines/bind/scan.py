@@ -9,8 +9,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from Bio.SeqUtils.IsoelectricPoint import IsoelectricPoint as IP
-
 import salad.inference as si
 from salad.modules.utils.dssp import assign_dssp
 from salad.inference.symmetry import Screw
@@ -34,8 +32,6 @@ from flexcraft.pipelines.bind.common import (
     sample_centers_spaced, save_centers, setup_files_scan, binder_step
 )
 from flexcraft.pipelines.bind.config import BINDER_OPT, PARAM_PATHS, DESIGN_OPT
-
-import pyrosetta as pr
 
 DESIGN_OPT.update(num_designs=5)
 opt = parse_options(
@@ -84,10 +80,6 @@ af2 = jax.jit(make_predict(make_af2(af2_config), num_recycle=4))
 cycler = af_cycler(jax.jit(make_predict(make_af2(af2_config), num_recycle=0)),
                 pmpnn, confidence=None, fix_template=opt.fix_template == "True",
                 fix_all=opt.fix_all == "True")
-
-# set up pyrosetta
-pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball {opt.alphaball_path} '
-        f'-corrections::beta_nov16 true -relax:default_repeats 1')
 
 # set up output files
 success, stats = setup_files_scan(opt.out_path)

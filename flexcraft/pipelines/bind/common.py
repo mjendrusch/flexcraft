@@ -18,6 +18,26 @@ from flexcraft.files.csv import ScoreCSV
 from salad.aflib.common.protein import from_pdb_string
 from salad.modules.utils.geometry import positions_to_ncacocb
 
+CHAIN_NAMES = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def init_pyrosetta(alphaball_path: str | None = None):
+    """Lazily import and initialize PyRosetta for BindCraft relaxation/scoring."""
+    try:
+        import pyrosetta as pr
+    except ImportError as exc:
+        raise ImportError(
+            "PyRosetta is required for Rosetta relaxation and interface scoring in `flexcraft.pipelines.bind`. "
+            "Install PyRosetta into `.venv` and preserve it across syncs with "
+            "`uv sync --inexact` (or run with `uv run --no-sync` / `--salad_only True`)."
+        ) from exc
+    if not pr.rosetta.basic.was_init_called():
+        dalphaball = f"-holes:dalphaball {alphaball_path} " if alphaball_path else ""
+        pr.init(
+            f"-ignore_unrecognized_res -ignore_zero_occupancy -mute all {dalphaball}"
+            "-corrections::beta_nov16 true -relax:default_repeats 1"
+        )
+
 # salad model step for binder design
 def binder_step(config):
     config = deepcopy(config)
@@ -142,25 +162,33 @@ def parse_target(c, path, num_aa, target_chains=None):
     init_data["plddt"] = structure.b_factors
     return init_data, init_prev, target_center, is_target, target_size
 
+def _parse_chain_residues(spec: str) -> np.ndarray:
+    rows = []
+    for item in spec.strip().split(","):
+        item = item.strip()
+        chain_id = CHAIN_NAMES.index(item[0])
+        span = item[1:]
+        if "-" in span:
+            start, end = [int(c) for c in span.split("-")]
+            rows.extend([chain_id, r] for r in range(start, end + 1))
+        else:
+            rows.append([chain_id, int(span)])
+    return np.array(rows, dtype=np.int32)
+
+
 def parse_hotspots(init_data, hotspot_string="none", coldspot_string="none"):
     is_target = init_data["is_target"]
     resi = init_data["residue_index"][is_target]
     chain = init_data["chain_index"][is_target]
     init_pos = init_data["pos"][is_target]
     if hotspot_string not in ("none", "auto"):
-        hotspots = np.array([
-            ["ABCDEFGHIJKLMNOPQRSTUVW".index(h[0]), int(h[1:])]
-            for h in hotspot_string.strip().split(",")], dtype=np.int32)
+        hotspots = _parse_chain_residues(hotspot_string)
     else:
         hotspots = np.array([(c, r) for r, c in zip(resi, chain)])
-    use_coldspots = False
     coldspot_mask = None
     coldpos = None
     if coldspot_string not in ("none", "plddt"):
-        use_coldspots = True
-        coldspots = np.array([
-            ["ABCDEFGHIJKLMNOPQRSTUVW".index(h[0]), int(h[1:])]
-            for h in coldspot_string.strip().split(",")], dtype=np.int32)
+        coldspots = _parse_chain_residues(coldspot_string)
         coldspot_mask = ((coldspots[:, 0] == chain[:, None]) * (coldspots[:, 1] == resi[:, None])).any(axis=1)
         coldpos = init_pos[coldspot_mask][:, 1]
     elif coldspot_string == "plddt":

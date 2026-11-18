@@ -1,15 +1,18 @@
-# simple motif scaffolding pipeline
+# Motif scaffolding pipelines
 
 `flexcraft.pipelines.graft.simple` provides a single-script motif grafting
-pipeline using `salad` for backbone generation, ProteinMPNN for sequence 
-design and AF2 for structure prediction and design selection.
+pipeline using `salad` for backbone generation, `ProteinMPNN` for sequence
+design, and `AlphaFold2` for structure prediction and design selection.
+For multi-segment shape conditioning or Screw symmetry backbone generation,
+`flexcraft.pipelines.graft.general` exposes `--symmetry`, `--centers`,
+`--center_radius`, and `--compact_by`.
 
 ## Getting started
 
 To design scaffolds for a part of PD-1 at
-`examples/binder_targets/pd1_hniu.pdb`, you can run the following command:
+`examples/binder_targets/pd1_hniu.pdb`, run:
 ```bash
-python -m flexcraft.pipelines.graft.simple \
+uv run --no-sync python -m flexcraft.pipelines.graft.simple \
     --motif_path examples/binder_targets/pd1_hniu.pdb \
     --out_path test_runs/motif-pd1-1/ \
     --assembly "50,A111-117,50,A121-127,50" \
@@ -18,12 +21,12 @@ python -m flexcraft.pipelines.graft.simple \
     --timescale "cosine(t)"
 ```
 
-This will run motif scaffolding for two surface-exposed beta strands in PD-1.
+This runs motif scaffolding for two surface-exposed beta strands in PD-1.
 Here, `--assembly` specifies how we want to scaffold the motif:
-The two strands `A111-117` and `A121-127` are scaffolded with 50 residues
+the two strands `A111-117` and `A121-127` are scaffolded with 50 residues
 on each side and 50 residues in between the strands.
 The amino acid sequence of the motif is preserved (`--use_motif_aa all`)
-and a variance-preserving (vp) diffusion model is used for `salad`.
+and a variance-preserving (`vp`) diffusion model is used for `salad`.
 
 ## Options
 ### parameter & dependency paths
@@ -38,7 +41,7 @@ structure created after running `download_params.sh`.
     contains the AF2 checkpoints.
 ### input and output files
 - `--motif_path`:
-    path to the motif file PDB file.
+    path to the motif PDB file, directory of PDB files, or `.jsonl` manifest.
 - `--out_path`:
     path to the output directory. Directory will be created if it does
     not exist.
@@ -56,10 +59,10 @@ structure created after running `download_params.sh`.
 ### motif settings
 - `--assembly`:
     assembly string specifying how motifs should be scaffolded.
-    Assembly strings can contain multiple ":"-separated **chains**,
-    each containing one or more ","-separated **segments**.
+    Assembly strings can contain multiple `":"`-separated **chains**,
+    each containing one or more `","`-separated **segments**.
     - motif segments:
-        contain motif information, relative to the input motif.pdb file.
+        contain motif information, relative to the input motif PDB file.
         E.g. `A20-30` specifies that amino acids `20-30` from chain `A`
         should be placed in this segment.
         Motif segments may also specify motif group information;
@@ -84,22 +87,20 @@ structure created after running `download_params.sh`.
             in different motif groups.
         - `20,A1-20,20:B`: scaffold the motif on chain A, taking along
             all of chain B. This is useful if a motif should be scaffolded
-            in such a way, that the scaffold is compatible with interacting
+            in such a way that the scaffold is compatible with interacting
             with chain B.
 - `--assembly_budget`:
     optional specification of a total amino acid budget for motif scaffolding.
-    Budget is specified per chain, e.g. "100:100:0" for 3 chains.
+    Budget is specified per chain, e.g. `"100:100:0"` for 3 chains.
     If the budget for a chain is 0, the chain will not be padded.
     Otherwise, chains that are shorter than the budget will be
-    flanked by a random number of non-motif residues on both the N and C-termini,
+    flanked by a random number of non-motif residues on both the N- and C-termini,
     such that the total number of residues in the chain equals the specified
-    budget. Default: "none". 
+    budget. Default: `"none"`.
 ### campaign size settings
 - `--num_designs`: number of requested designs passing all filters. Default: 48.
-    Consider generating more designs than required, then selecting the best
-    designs by ipAE.
 - `--num_sequences`: number of ProteinMPNN sequences per backbone. Default: 10.
-- `--num_success`: number of successful designs to look for per backbone. 
+- `--num_success`: number of successful designs to look for per backbone.
     Default: 1.
 ### design process settings
 - `--prev_threshold`:
@@ -108,36 +109,36 @@ structure created after running `download_params.sh`.
 - `--clash_lr`:
     clash potential learning rate. Higher values encourage less compact,
     more helical structures with fewer potential clashes.
-    Default: 5e-3. Reasonable range: 0.0 - 7e-2.
+    Default: 0.0 (typical tuning range: 0.0 - 7e-2).
 - `--compact_lr`:
     compactness potential learning rate. Higher values encourage more compact
     structures but also increase potential for clashes.
-    Therefore, larger `compact_lr` necessitates larget `clash_lr`.
-    Default: 1e-4. Reasonable range: 0.0 - 2e-3.
+    Therefore, larger `compact_lr` necessitates larger `clash_lr`.
+    Default: 0.0 (typical tuning range: 0.0 - 2e-3).
 - `--[h|e|l]_bias`: bias the design for **h**elix, sh**e**et or **l**oop.
 - `--align_threshold`: threshold diffusion time below which to use
-    structural alignment for motif scaffolding.
+    structural alignment for motif scaffolding. Default: 2.0.
 - `--dmap_threshold`: threshold diffusion time below which to use
-    distance map input for motif scaffolding.
+    distance map input for motif scaffolding. Default: 0.5.
 - `--template_motif`:
     apply a template to the motif during structure prediction?
-    "True" or "False". Default: False.
+    "True" or "False". Default: "False".
 - `--use_motif_aa`:
     provide motif sequence information to the model?
-    One of "none", "all", "within_motif".
-    - `none`: provides no sequence information.
-    - `all`: default. Provides full sequence information.
-    - `within_motif`: Only provides buried residue sequence information.
+    One of `"none"`, `"all"`, `"within_motif"`.
+    - `none`: provides no sequence information (default in `graft.general`).
+    - `all`: provides full sequence information (default in `graft.simple`).
+    - `within_motif`: only provides buried residue sequence information (`--buried_contacts`).
 - `--mask_motif_plddt`:
     should motif pLDDT be excluded from the pLDDT average for filtering?
     "True" or "False". Default: "True".
 - `--timescale`:
-    diffusion timescale. For variance-preserving checkpoints (vp),
-    should be `cosine(t)`. For variance-expanding checkpoints (ve),
-    should be `ve(t)`.
-- `--seed`: `jax` starting random seed
-### filter settings
-- `f_plddt`: Filter minimum pLDDT. Default: 0.8.
-- `f_sc_rmsd`: Filter maximum scRMSD. Default: 2.0.
-- `f_pae`: Filter maximum normalized pAE. Default: 0.25.
-- `f_motif_bb_rmsd`: Filter maximum motif backbone RMSD. Default: 2.0.
+    diffusion timescale. For variance-preserving checkpoints (`vp`),
+    use `cosine(t)`. For variance-expanding checkpoints (`ve`),
+    use `ve(t, sigma_max=80.0)`.
+- `--seed`: `jax` starting random seed.
+### filter settings (`graft.simple`)
+- `--f_plddt`: Filter minimum pLDDT. Default: 0.8.
+- `--f_sc_rmsd`: Filter maximum CA scRMSD (Angstroms). Default: 2.0.
+- `--f_pae`: Filter maximum normalized pAE. Default: 0.25.
+- `--f_motif_rmsd`: Filter maximum motif backbone RMSD (Angstroms). Default: 2.0.

@@ -2,390 +2,338 @@
 # https://blog.escalante.bio/teaching-generative-models-to-hallucinate/
 
 import os
-import time
-import hashlib
 import uuid
-import numpy as np
-import jax
+
 import haiku as hk
-
-from flexcraft.structure._colab_af.alphafold.model.config import model_config
-from flexcraft.structure._colab_af.alphafold.model.data import get_model_haiku_params
-
+import jax
+import jax.numpy as jnp
+import numpy as np
 import optax
 
-from flexcraft.utils.options import parse_options
-from flexcraft.utils.rng import Keygen
-from flexcraft.utils import Keygen, parse_options, load_pdb, data_from_salad
-from flexcraft.sequence.sample import *
-from flexcraft.data.data import DesignData
-from flexcraft.sequence.mpnn import make_pmpnn
 import flexcraft.sequence.aa_codes as aas
-from flexcraft.hallucination.opt import jit_loss_update, simplex_agpm
-from flexcraft.structure.boltz._model import Joltz2, JoltzResult
-from flexcraft.structure.boltz._data import JoltzSpec, JoltzInput
-from flexcraft.structure.af import AFInput, AFResult, make_af2, make_predict
+from flexcraft.data.data import DesignData
 from flexcraft.files.csv import ScoreCSV
-
-def _parse_hotspots(spec: str, binder_length = 100) -> None | np.ndarray:
-    if spec == "none":
-        return None
-    return binder_length + np.concatenate([
-        _parse_chunk(c) for c in spec.split(",")], axis=0)
-
-def _parse_chunk(spec: str) -> np.ndarray:
-    if "-" not in spec:
-        return np.array([int(spec) - 1], dtype=np.int32)
-    start, end = [int(c) for c in spec.split("-")]
-    return np.arange(start - 1, end, dtype=np.int32)
-
-opt = parse_options(
-    "predict structures with AlphaFold",
-    pmpnn_path="params/solmpnn/v_48_030.pkl",
-    salad_path="params/salad/default_vp_scaled-200k.jax",
-    boltz_path="params/boltz/",
-    target_path="target.pdb",
-    target_sequence="none",
-    target_template="none",
-    predict_template="True",
-    off_target_sequence="none",
-    hotspots="none",
-    target_chains="all",
-    out_path="out",
-    center="False",
-    model_name="model_1_ptm",
-    param_path="params/af",
-    sample_structure="False",
-    inter_contact_distance=20.0,
-    intra_contact_distance=14.0,
-    hotspot_distance=0.0,
-    num_designs=48,
-    length=80,
-    repeat=1,
-    temperature=0.1,
-    samples=10,
-    seed=42,
-    tmpdir="tmp/"
+from flexcraft.hallucination.opt import jit_loss_update, simplex_agpm
+from flexcraft.pipelines.bind.hal import (
+    _parse_chunk,
+    _parse_hotspots,
+    _passing,
+    _report_result,
+    _report_trajectory,
+    binder_hallucination_metrics,
 )
-
-binder_length = opt.length
-target_template = opt.target_template
-if target_template == "none" and opt.predict_template == "True":
-    os.makedirs(opt.tmpdir, exist_ok=True)
-    target_template = f"{opt.tmpdir}/target_{str(uuid.uuid4())}.cif"
-key = Keygen(opt.seed)
-kval = key()
-# set up protein mpnn
-pmpnn, pmpnn_params = make_pmpnn(opt.pmpnn_path, eps=0.05, split_params=True)
-jit_pmpnn = jax.jit(pmpnn)
-params = dict(
-    mpnn=pmpnn_params
+from flexcraft.sequence.mpnn import batch_mpnn, make_pmpnn
+from flexcraft.structure.af import (
+    AFInput,
+    AFResult,
+    get_model_haiku_params,
+    make_af2,
+    make_predict,
+    model_config,
 )
-# set up salad
-sample_structure = opt.sample_structure == "True"
-sampler = None
-if sample_structure:
-    import salad.inference as si
-    def cloud_std_default(num_aa):
-        minval = num_aa ** 0.4
-        return minval + np.random.rand() * 3.0
+from flexcraft.structure.boltz import Joltz2, JoltzSpec
+from flexcraft.utils import Keygen, data_from_salad, load_pdb, parse_options
 
-    def model_step(config):
-        config.eval = True
-        @hk.transform
-        def step(data, prev):
-            noise = si.StructureDiffusionNoise(config)
-            predict = si.StructureDiffusionPredict(config)
-            data.update(noise(data))
-            out, prev = predict(data, prev)
-            return out, prev
-        return step.apply
 
-    salad_config, salad_params = si.make_salad_model("default_vp_scaled", opt.salad_path)
-
-    # initialize salad data and prev from the num_aa specification
-    num_aa, resi, chain, is_cyclic, cyclic_mask = si.parse_num_aa(f"{opt.length}")
-    salad_data, init_prev = si.data.from_config(
-        salad_config,
-        num_aa=num_aa,
-        residue_index=resi,
-        chain_index=chain,
-        cyclic_mask=cyclic_mask)
-
-    salad_step = model_step(salad_config)
-    # build a sampler object for sampling
-    sampler = si.Sampler(salad_step, out_steps=400)
-# hotspot index
-hotspot_index = _parse_hotspots(opt.hotspots, binder_length = binder_length)
-# retrieve target
-target_sequence = opt.target_sequence
-# set up Boltz models
-model = Joltz2(cache=opt.boltz_path)
-# full-atom predictor with context
-joltz_pred = model.predictor(num_recycle=4)
-# if applicable, predict & save a msa or template structure
-prediction = joltz_pred(key(), JoltzSpec().add_protein(
-    *[c for c in target_sequence.split(":")], use_msa=False)) # FIXME
-prediction.save_cif(target_template)
-target_template_pdb = ".".join(list(target_template.split(".")[:-1]) + ["pdb"])
-prediction.save_pdb(target_template_pdb)
-# set up AF2 with Joltz-predicted template
-af2_params = get_model_haiku_params(
-    model_name=opt.model_name,
-    data_dir=opt.param_path, fuse=True)
-af2_params = jax.tree.map(lambda x: jnp.array(x), af2_params)
-config = model_config(opt.model_name)
-config.model.global_config.use_dgram = False
-config.model.global_config.use_remat = True
-af2 = make_predict(make_af2(config), num_recycle=2)
-target = load_pdb(target_template_pdb)
-design_data = DesignData.concatenate((DesignData.from_length(binder_length), target))
-is_target = jnp.zeros_like(design_data["mask"]).at[binder_length:].set(True)
-af_template_data = AFInput.from_data(design_data).add_template(
-    design_data, where=is_target)
-params["af2"] = af2_params
-
-def batch_mpnn(mpnn):
-    def _mpnn_map(params, key, data):
-        if len(data["atom_positions"].shape) == 4:
-            num_samples = data["atom_positions"].shape[0]
-            # replicate all un-batched inputs
-            xx = {
-                key: jnp.repeat(data[key][None, :], num_samples, axis=0)
-                for key in ["atom_mask", "mask", "aa", "residue_index", "chain_index", "batch_index"]
-            }
-            # add in the batched atom positions
-            xx["atom_positions"] = data["atom_positions"]
-            # split keys across batch
-            keys = jax.random.split(key, num_samples)
-            # vmap the ProteinMPNN
-            return jax.vmap(mpnn, (None, 0, 0), 0)(params, keys, xx)
-        else:
-            return mpnn(params, key, data)
-    return _mpnn_map
-
-def metrics(sequence, key, result: AFResult):
-    res_data = result.to_data()
-    binder_data = res_data[:binder_length]
-    dssp = binder_data.p_dssp
-    pmpnn_input = res_data.update(aa=aas.translate(res_data["aa"], aas.AF2_CODE, aas.PMPNN_CODE))
-    is_binder = jnp.zeros((pmpnn_input.aa.shape[0],), dtype=jnp.bool_).at[:binder_length].set(True)
-    logits = batch_mpnn(pmpnn)(params["mpnn"], key, pmpnn_input.drop_aa(where=is_binder))["logits"]
-    logits = aas.translate_onehot(logits, aas.PMPNN_CODE, aas.AF2_CODE)[..., :20]
-    logits = logits[:binder_length]
-    center = logits.mean(axis=0)
-    logits = logits - center
-    prob = jax.lax.stop_gradient(jax.nn.softmax(logits.at[:, aas.AF2_CODE.index("C")].set(-1e6) / 0.1, axis=-1))
-    entropy = -(jax.nn.log_softmax(logits, axis=-1) * prob).sum(axis=-1).mean()
-    # losses
-    plddt = result.plddt
-    pae = 32 * result.pae # unnormalized pAE
-    binder_selector = result.chain_index == 0
-    hotspot_selector = result.chain_index != 0
-    if hotspot_index is not None:
-        hotspot_selector = (np.arange(result.residue_index.shape[0])[:, None] == hotspot_index).any(axis=-1)
-    hotspot_contacts = (
-        result.index_contact_score(
-            binder_selector, hotspot_selector, # NOTE: flip target and binder here
-            num_contacts=3, contact_distance=opt.inter_contact_distance)
-      + result.index_contact_score(
-            hotspot_selector, binder_selector, # NOTE: flip target and binder here
-            num_contacts=3, contact_distance=opt.inter_contact_distance)
-    ) / 2
-    distance_map = (result.distogram * result.distogram_bin_centers).sum(axis=-1)
-    hotspot_distance_mask = hotspot_selector[:, None] * binder_selector[None, :]
-    distance_map = jnp.where(hotspot_distance_mask, distance_map, 0.0)
-    # hotspot_distance = -jax.nn.logsumexp(-distance_map, axis=1)
-    hotspot_distance = distance_map.sum() / jnp.maximum(1, hotspot_distance_mask.sum())
-    binder_target_contacts = result.chain_contact_score(
-        1, 0, num_contacts=3, contact_distance=opt.inter_contact_distance)
-    if hotspot_index is not None:
-        binder_target_contacts = hotspot_contacts
-    return dict(
-        logits = logits,
-        entropy = entropy,
-        plddt = plddt[:binder_length].mean(),
-        recovery = (sequence * prob).sum(axis=-1).mean(),
-        binder_target_contacts = binder_target_contacts,
-        within_binder_contacts = result.chain_contact_score(0, 0, num_contacts=25, min_resi_distance=10),
-        hotspot_contacts = hotspot_contacts,
-        hotspot_distance = hotspot_distance,
-        within_binder_pae = pae[:binder_length, :binder_length].mean(),
-        binder_target_pae = pae[:binder_length, binder_length:].mean(),
-        target_binder_pae = pae[binder_length:, :binder_length].mean(),
-        iptm = result.index_iptm(chain_index=is_binder),
-        eptm = result.index_ptm_score(chain_index=is_binder),
-        ipsae = result.ipsae(chain_index=is_binder),
-        average_num_nonzero = (sequence > 0.01).sum(axis=-1).mean(),
-        L = dssp["L"], H = dssp["H"], E = dssp["E"]
+def main():
+    opt = parse_options(
+        "predict structures with AlphaFold",
+        pmpnn_path="params/solmpnn/v_48_030.pkl",
+        salad_path="params/salad/default_vp_scaled-200k.jax",
+        boltz_path="params/boltz/",
+        target_path="target.pdb",
+        target_sequence="none",
+        target_template="none",
+        predict_template="True",
+        off_target_sequence="none",
+        hotspots="none",
+        target_chains="all",
+        out_path="out",
+        center="False",
+        model_name="model_1_ptm",
+        param_path="params/af",
+        sample_structure="False",
+        inter_contact_distance=20.0,
+        intra_contact_distance=14.0,
+        hotspot_distance=0.0,
+        num_designs=48,
+        length=80,
+        repeat=1,
+        temperature=0.1,
+        samples=10,
+        seed=42,
+        tmpdir="tmp/",
     )
 
-def _report_trajectory(index: int, writer: ScoreCSV, start_step=0):
-    def _report(step: int, loss: float, aux: dict):
-        print(loss.shape)
-        line_info = dict(attempt=index, step=start_step + step, total=float(loss.mean()))
-        for key in writer.keys:
-            if key in aux:
-                line_info[key] = float(aux[key].mean())
-        writer.write_line(line_info)
-    return _report
+    binder_length = opt.length
+    target_template = opt.target_template
+    if target_template == "none" and opt.predict_template == "True":
+        os.makedirs(opt.tmpdir, exist_ok=True)
+        target_template = f"{opt.tmpdir}/target_{str(uuid.uuid4())}.cif"
+    key = Keygen(opt.seed)
+    kval = key()
 
-def _report_result(attempt: int, stage: str, key, writer: ScoreCSV, sequence, result: JoltzResult, aux=None):
-    if aux is None:
-        aux = metrics(sequence, key, result)
-    line_info = dict(attempt=attempt, stage=stage, sequence=aas.decode(jnp.argmax(sequence, axis=-1), aas.AF2_CODE))
-    for key in writer.keys:
-        if key in aux:
-            line_info[key] = float(aux[key].mean())
-    writer.write_line(line_info)
-    return aux
+    pmpnn, pmpnn_params = make_pmpnn(opt.pmpnn_path, eps=0.05, split_params=True)
+    jit_pmpnn = jax.jit(pmpnn)
+    params = dict(mpnn=pmpnn_params)
 
-def _passing(aux):
-    return (
-        aux["ipsae"] > 0.75 and aux["plddt"] > 0.8
-        and aux["binder_target_pae"] < 5.0 and aux["target_binder_pae"] < 5.0
-        and aux["recovery"] > 0.6
-    )
+    sample_structure = opt.sample_structure == "True"
+    sampler = None
+    if sample_structure:
+        import salad.inference as si
 
-# fitness function for hallucination
-def loss(sequence, key=kval, context=None, params=None):
-    keys = jax.random.split(key, 4)
-    # forbid cysteines
-    sequence = sequence.at[:, aas.AF2_CODE.index("C")].set(0.0)
-    sequence = sequence / sequence.sum(axis=1, keepdims=True)
-    # predict structure
-    target_sequence = jax.nn.one_hot(
-            af_template_data.data["aatype"], 20, axis=-1)[binder_length:]
-    af_data = af_template_data.update_sequence(
-        jnp.concatenate((sequence, target_sequence), axis=0))
-    af_data = af_data.block_diagonal(2)
-    result: AFResult = af2(params["af2"], keys[0], af_data)
-    # compute losses
-    out = metrics(sequence, keys[1], result)
-    out["result"] = result
+        def cloud_std_default(n_aa):
+            minval = n_aa**0.4
+            return minval + np.random.rand() * 3.0
 
-    # combination
-    value = (
-          out["binder_target_contacts"]
-        + out["within_binder_contacts"]
-        - context["recovery"] * out["recovery"]
-        + 0.05 * out["target_binder_pae"]
-        + 0.05 * out["binder_target_pae"]
-        + 0.4 * out["within_binder_pae"]
-        - 0.1 * out["plddt"]
-        - 0.025 * out["iptm"]
-        - 0.025 * out["eptm"]
-    )
-    if opt.hotspot_distance > 0:
-        value += opt.hotspot_distance * out["hotspot_distance"]
-    if "off_input" in params:
-        value += (
-            - out["off_target_contacts"].mean()
+        def model_step(config):
+            config.eval = True
+
+            @hk.transform
+            def step(data, prev):
+                noise = si.StructureDiffusionNoise(config)
+                predict = si.StructureDiffusionPredict(config)
+                data.update(noise(data))
+                out, prev = predict(data, prev)
+                return out, prev
+
+            return step.apply
+
+        salad_config, salad_params = si.make_salad_model(
+            "default_vp_scaled", opt.salad_path
         )
-    out["total"] = value
-    return value, out
-loss_update = jit_loss_update(loss)
+        num_aa, resi, chain, is_cyclic, cyclic_mask = si.parse_num_aa(f"{opt.length}")
+        salad_data, init_prev = si.data.from_config(
+            salad_config,
+            num_aa=num_aa,
+            residue_index=resi,
+            chain_index=chain,
+            cyclic_mask=cyclic_mask,
+        )
+        salad_step = model_step(salad_config)
+        sampler = si.Sampler(salad_step, out_steps=400)
 
-if sample_structure:
-    os.makedirs(f"{opt.out_path}/blueprints/", exist_ok=True)
-os.makedirs(f"{opt.out_path}/attempts/", exist_ok=True)
-os.makedirs(f"{opt.out_path}/success/", exist_ok=True)
-common_keys = [
-    "plddt",
-    "recovery",
-    "binder_target_contacts",
-    "hotspot_contacts",
-    "within_binder_contacts",
-    "within_binder_pae",
-    "binder_target_pae",
-    "target_binder_pae",
-    "iptm",
-    "eptm",
-    "ipsae",
-    "average_num_nonzero",
-    "entropy",
-    "L", "H", "E"
-]
-trajectory_keys = [k for k in common_keys]
-trajectory = ScoreCSV(f"{opt.out_path}/trajectory.csv", keys=["attempt", "step"] + trajectory_keys)
-results_keys = [
-    "attempt", "stage", "sequence"
-] + common_keys
-results = ScoreCSV(f"{opt.out_path}/results.csv", keys=results_keys)
-success = ScoreCSV(f"{opt.out_path}/success.csv", keys=results_keys)
+    hotspot_index = _parse_hotspots(opt.hotspots, binder_length=binder_length)
 
-success_count = 0
-attempt = 0
-_attempt = 0
-while success_count < opt.num_designs:
-    attempt = _attempt
-    _attempt += 1
-    context = dict(recovery=0.0)
-    if sampler is not None:
-        salad_data["dssp_condition"], dssp_string = si.random_dssp(
-            num_aa, p=0.0, p_keep_loop=1.0, return_string=True)
-        print("DSSP target:", dssp_string)
-        salad_data["cloud_std"] = cloud_std_default(num_aa)
-        salad_design = sampler(salad_params, key(), salad_data, init_prev)
-        design = data_from_salad(salad_design)
-        design.save_pdb(f"{opt.out_path}/blueprints/design_{attempt}.pdb")
-        sequence = aas.translate_onehot(
-            jit_pmpnn(pmpnn_params, key(), design.drop_aa())["logits"],
-            aas.PMPNN_CODE, aas.AF2_CODE)[..., :20]
-        sequence = jax.nn.softmax(sequence, axis=-1)
+    if opt.target_sequence != "none":
+        target_sequence = opt.target_sequence
+        model = Joltz2(cache=opt.boltz_path)
+        joltz_pred = model.predictor(num_recycle=4)
+        prediction = joltz_pred(
+            key(),
+            JoltzSpec().add_protein(*target_sequence.split(":"), use_msa=False),
+        )
+        prediction.save_cif(target_template)
+        target_template_pdb = ".".join(list(target_template.split(".")[:-1]) + ["pdb"])
+        prediction.save_pdb(target_template_pdb)
+        target = load_pdb(target_template_pdb).unpad()
     else:
-        sequence = jax.random.gumbel(key(), (opt.length, 20), dtype=jnp.float32)
-        sequence *= np.random.uniform(low=0.75, high=5.0)
-        sequence = jnp.array(sequence, dtype=jnp.float32)
-        sequence = jax.nn.softmax(sequence, axis=-1)
-    sequence, loss_val, aux = simplex_agpm(
-        sequence, loss_update, key=key, params=params, context=context,
-        num_steps=100, # 100
-        lr=0.1 * jnp.sqrt(sequence.shape[0]), momentum=0.3,
-        scale=1.0,
-        grad_transform=optax.clip_by_global_norm(1.0),
-        param_transform=lambda x: x.at[:, aas.AF2_CODE.index("C")].set(0.0),
-        verbose=True, return_last=False,
-        early_stop=None,
-        report=_report_trajectory(attempt, trajectory, start_step=0))
-    sequence_1 = sequence
-    result: AFResult = aux["result"]
-    result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_0.pdb")
-    data = result.to_data()
-    (_, aux), _ = loss_update(
-        jax.nn.one_hot(jnp.argmax(sequence, axis=1), 20),
-        params=params, context=dict(recovery=10.0), key=key())
-    prediction_1: AFResult = aux["result"]
-    stage_1 = _report_result(attempt, "stage_1", key(), results, sequence, prediction_1)
-    prediction_1.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_1.pdb")
-    sequence = jnp.log(sequence + 1e-5)
-    context["recovery"] = 10.0
-    sequence, loss_val, aux = simplex_agpm(
-        sequence, loss_update, key=key, params=params, context=context,
-        num_steps=50, # 50
-        lr=0.5 * jnp.sqrt(sequence.shape[0]),
-        scale=1.25,
-        grad_transform=optax.clip_by_global_norm(1.0),
-        param_transform=lambda x: x.at[:, aas.AF2_CODE.index("C")].set(-1e6),
-        verbose=True, return_last=True, opt_logits=True,
-        report=_report_trajectory(attempt, trajectory, start_step=100))
-    sequence_2 = sequence
-    result = aux["result"]
-    result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_1.pdb")
-    data = result.to_data()
-    prediction_2: AFResult = aux["result"]
-    stage_2 = _report_result(attempt, "stage_2", key(), results, sequence, prediction_2)
-    prediction_2.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_2.pdb")
-    stage = "stage_2"
-    aux = stage_2
-    prediction = prediction_2
-    sequence = sequence_2
-    if stage_2["ipsae"] < stage_1["ipsae"] and _passing(stage_1):
-        stage = "stage_1"
-        aux = stage_1
-        prediction = prediction_1
-        sequence = sequence_1
-    if _passing(aux):
-        _report_result(attempt, stage, key(), success, sequence, prediction.result, aux=aux)
-        prediction.save_pdb(f"{opt.out_path}/success/design_{attempt}_{stage}.pdb")
-        success_count += 1
+        target = load_pdb(opt.target_path).unpad()
+        if opt.target_chains != "all":
+            selected_chains = np.array(
+                ["ABCDEFGHIJKLMNOPQRSTUVWXYZ".index(c) for c in opt.target_chains],
+                dtype=np.int32,
+            )
+            target = target[(target.chain_index[:, None] == selected_chains).any(axis=-1)]
+
+    af2_params = get_model_haiku_params(
+        model_name=opt.model_name, data_dir=opt.param_path, fuse=True
+    )
+    af2_params = jax.tree.map(lambda x: jnp.array(x), af2_params)
+    config = model_config(opt.model_name)
+    config.model.global_config.use_dgram = False
+    config.model.global_config.use_remat = True
+    af2 = make_predict(make_af2(config), num_recycle=2)
+    design_data = DesignData.concatenate(
+        (DesignData.from_length(binder_length), target)
+    )
+    is_target = jnp.zeros_like(design_data["mask"]).at[binder_length:].set(True)
+    af_template_data = AFInput.from_data(design_data).add_template(
+        design_data, where=is_target
+    )
+    params["af2"] = af2_params
+
+    def metrics(sequence, step_key, result: AFResult):
+        return binder_hallucination_metrics(
+            sequence,
+            step_key,
+            result,
+            binder_length=binder_length,
+            pmpnn=pmpnn,
+            mpnn_params=params["mpnn"],
+            inter_contact_distance=opt.inter_contact_distance,
+            intra_contact_distance=opt.intra_contact_distance,
+            hotspot_index=hotspot_index,
+        )
+
+    def loss(sequence, key=kval, context=None, params=None):
+        keys = jax.random.split(key, 4)
+        sequence = sequence.at[:, aas.AF2_CODE.index("C")].set(0.0)
+        sequence = sequence / sequence.sum(axis=1, keepdims=True)
+        target_mask = (af_template_data.data["seq_mask"][binder_length:] > 0)[:, None]
+        target_seq_oh = (
+            jax.nn.one_hot(
+                af_template_data.data["aatype"][binder_length:], 20, axis=-1
+            )
+            * target_mask
+        )
+        af_data = af_template_data.update_sequence(
+            jnp.concatenate((sequence, target_seq_oh), axis=0)
+        )
+        af_data = af_data.block_diagonal(2)
+        result: AFResult = af2(params["af2"], keys[0], af_data)
+        out = metrics(sequence, keys[1], result)
+        out["result"] = result
+
+        value = (
+            out["binder_target_contacts"]
+            + out["within_binder_contacts"]
+            - context["recovery"] * out["recovery"]
+            + 0.05 * out["target_binder_pae"]
+            + 0.05 * out["binder_target_pae"]
+            + 0.4 * out["within_binder_pae"]
+            - 0.1 * out["plddt"]
+            - 0.025 * out["iptm"]
+            - 0.025 * out["eptm"]
+        )
+        if opt.hotspot_distance > 0:
+            value += opt.hotspot_distance * out["hotspot_distance"]
+        if "off_input" in params:
+            value += -out["off_target_contacts"].mean()
+        out["total"] = value
+        return value, out
+
+    loss_update = jit_loss_update(loss)
+
+    if sample_structure:
+        os.makedirs(f"{opt.out_path}/blueprints/", exist_ok=True)
+    os.makedirs(f"{opt.out_path}/attempts/", exist_ok=True)
+    os.makedirs(f"{opt.out_path}/success/", exist_ok=True)
+    common_keys = [
+        "plddt",
+        "recovery",
+        "binder_target_contacts",
+        "hotspot_contacts",
+        "within_binder_contacts",
+        "within_binder_pae",
+        "binder_target_pae",
+        "target_binder_pae",
+        "iptm",
+        "eptm",
+        "ipsae",
+        "average_num_nonzero",
+        "entropy",
+        "L",
+        "H",
+        "E",
+    ]
+    trajectory = ScoreCSV(
+        f"{opt.out_path}/trajectory.csv", keys=["attempt", "step"] + common_keys
+    )
+    results_keys = ["attempt", "stage", "sequence"] + common_keys
+    results = ScoreCSV(f"{opt.out_path}/results.csv", keys=results_keys)
+    success = ScoreCSV(f"{opt.out_path}/success.csv", keys=results_keys)
+
+    success_count = 0
+    _attempt = 0
+    while success_count < opt.num_designs:
+        attempt = _attempt
+        _attempt += 1
+        context = dict(recovery=0.0)
+        if sampler is not None:
+            salad_data["dssp_condition"], dssp_string = si.random_dssp(
+                num_aa, p=0.0, p_keep_loop=1.0, return_string=True
+            )
+            print("DSSP target:", dssp_string)
+            salad_data["cloud_std"] = cloud_std_default(num_aa)
+            salad_design = sampler(salad_params, key(), salad_data, init_prev)
+            design = data_from_salad(salad_design)
+            design.save_pdb(f"{opt.out_path}/blueprints/design_{attempt}.pdb")
+            sequence = aas.translate_onehot(
+                jit_pmpnn(pmpnn_params, key(), design.drop_aa())["logits"],
+                aas.PMPNN_CODE,
+                aas.AF2_CODE,
+            )[..., :20]
+            sequence = jax.nn.softmax(sequence, axis=-1)
+        else:
+            sequence = jax.random.gumbel(key(), (opt.length, 20), dtype=jnp.float32)
+            sequence *= np.random.uniform(low=0.75, high=5.0)
+            sequence = jnp.array(sequence, dtype=jnp.float32)
+            sequence = jax.nn.softmax(sequence, axis=-1)
+        sequence, _, aux = simplex_agpm(
+            sequence,
+            loss_update,
+            key=key,
+            params=params,
+            context=context,
+            num_steps=100,
+            lr=0.1 * jnp.sqrt(sequence.shape[0]),
+            momentum=0.3,
+            scale=1.0,
+            grad_transform=optax.clip_by_global_norm(1.0),
+            param_transform=lambda x: x.at[:, aas.AF2_CODE.index("C")].set(0.0),
+            verbose=True,
+            return_last=False,
+            early_stop=None,
+            report=_report_trajectory(attempt, trajectory, start_step=0),
+        )
+        sequence_1 = sequence
+        result: AFResult = aux["result"].unpad()
+        result.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_0.pdb")
+        (_, aux), _ = loss_update(
+            jax.nn.one_hot(jnp.argmax(sequence, axis=1), 20),
+            params=params,
+            context=dict(recovery=10.0),
+            key=key(),
+        )
+        prediction_1: AFResult = aux["result"].unpad()
+        stage_1 = _report_result(
+            attempt, "stage_1", key(), results, sequence, prediction_1, metrics
+        )
+        prediction_1.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_1.pdb")
+
+        sequence = jnp.log(sequence + 1e-5)
+        context["recovery"] = 10.0
+        sequence, _, aux = simplex_agpm(
+            sequence,
+            loss_update,
+            key=key,
+            params=params,
+            context=context,
+            num_steps=50,
+            lr=0.5 * jnp.sqrt(sequence.shape[0]),
+            scale=1.25,
+            grad_transform=optax.clip_by_global_norm(1.0),
+            param_transform=lambda x: x.at[:, aas.AF2_CODE.index("C")].set(-1e6),
+            verbose=True,
+            return_last=True,
+            opt_logits=True,
+            report=_report_trajectory(attempt, trajectory, start_step=100),
+        )
+        sequence_2 = sequence
+        prediction_2: AFResult = aux["result"].unpad()
+        prediction_2.save_pdb(f"{opt.out_path}/attempts/raw_{attempt}_1.pdb")
+        stage_2 = _report_result(
+            attempt, "stage_2", key(), results, sequence, prediction_2, metrics
+        )
+        prediction_2.save_pdb(f"{opt.out_path}/attempts/design_{attempt}_2.pdb")
+
+        stage = "stage_2"
+        aux = stage_2
+        prediction = prediction_2
+        sequence = sequence_2
+        if stage_2["ipsae"] < stage_1["ipsae"] and _passing(stage_1):
+            stage = "stage_1"
+            aux = stage_1
+            prediction = prediction_1
+            sequence = sequence_1
+        if _passing(aux):
+            _report_result(
+                attempt, stage, key(), success, sequence, prediction, metrics, aux=aux
+            )
+            prediction.save_pdb(f"{opt.out_path}/success/design_{attempt}_{stage}.pdb")
+            success_count += 1
+
+
+if __name__ == "__main__":
+    main()

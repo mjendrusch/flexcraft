@@ -9,8 +9,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from Bio.SeqUtils.IsoelectricPoint import IsoelectricPoint as IP
-
 import salad.inference as si
 from salad.modules.utils.dssp import assign_dssp
 from salad.inference.symmetry import Screw
@@ -58,7 +56,8 @@ key = Keygen(opt.seed)
 config, salad_params = si.make_salad_model(
     "default_ve_scaled", opt.salad_params)
 init_data, init_prev, target_center, is_target, target_size = parse_target(
-    config, opt.target, opt.num_aa, target_chains=opt.target_chains)
+    config, opt.target, opt.num_aa,
+    target_chains=None if opt.target_chains == "all" else opt.target_chains)
 config = config_from_opt(config, opt)
 hotpos, coldpos, hotspot_mask, coldspot_mask = parse_hotspots(
     init_data, opt.hotspots, opt.coldspots)

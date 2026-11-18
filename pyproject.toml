@@ -8,39 +8,176 @@ version = "0.0.2"
 description = "Glue code for plugging together different protein design models."
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 keywords = ["protein", "machine learning", "jax"]
 authors = [{ name = "Michael A. Jendrusch", email = "michael.jendrusch@embl.de" }]
 maintainers = [{ name = "Michael A. Jendrusch", email = "michael.jendrusch@embl.de" }]
 
-classifiers = [
-
-]
+classifiers = []
 
 dependencies = [
-    "salad @ git+https://github.com/mjendrusch/salad.git",
-    "ml-collections>=1.1.0"
+    "jax>=0.12",
+    "dm-haiku>=0.0.16",
+    "equinox>=0.13.5",
+    "chex",
+    "optax>=0.2.5",
+    "dm-tree>=0.1.8",
+    "ml-collections>=1.1.0",
+    "numpy>=2.1.0",
+    "scipy>=1.15.3",
+    "pandas>=2.3.1",
+    "gemmi>=0.6.5",
+    "pyyaml>=6.0.2",
+    "requests>=2.32.3",
+    "joblib",
+    "tqdm>=4.67.1",
+    "torch>=2.11.0,<2.12.0",
+    "atomworks[ml]>=3.0.4",
+    "salad",
+    "rfd4fx",
+    "joltz",
+    "boltz",
+    "protenix",
+    "esmjfold2",
 ]
 
 [project.optional-dependencies]
-joltz = [
-    "joltz @ git+https://github.com/nboyd/joltz.git",
-    "protenix @ git+https://github.com/escalante-bio/protenij.git",
-    "boltz @ git+https://github.com/escalante-bio/boltz.git",
-    "torch>=2.3.1",
-    "equinox>=0.13.5",
-]
-esmfold2 = [
-    # esm pins torch to 2.11.x; install the CPU wheel first, since all inference
-    # runs in JAX and torch is only used to featurize and convert the checkpoint
-    "esmjfold2 @ git+https://github.com/escalante-bio/esmjfold2.git",
-]
+cuda12 = ["jax[cuda12]>=0.12; sys_platform == 'linux'"]
+cuda13 = ["jax[cuda13]>=0.12; sys_platform == 'linux'"]
+order = ["dnachisel"]
+joltz = []
+esmfold2 = []
 
 [project.urls]
 "Homepage" = "https://github.com/mjendrusch/flexcraft"
-"Bug reportes" = "https://github.com/mjendrusch/flexcraft/issues"
+"Bug Tracker" = "https://github.com/mjendrusch/flexcraft/issues"
 "Source" = "https://github.com/mjendrusch/flexcraft/"
 
 [tool.setuptools.packages.find]
 include = ["flexcraft*"]
 exclude = ["data*"]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+conflicts = [[{ extra = "cuda12" }, { extra = "cuda13" }]]
+override-dependencies = ["protobuf>=4.25.0"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+salad = { git = "https://github.com/mjendrusch/salad.git" }
+rfd4fx = { git = "https://github.com/mjendrusch/rfd4fx.git" }
+joltz = { git = "https://github.com/nboyd/joltz.git", rev = "ed0f04257dac85bd4b7bf45521cc280f86d38ded" }
+boltz = { git = "https://github.com/escalante-bio/boltz.git", rev = "6e405c65237fee0c55eb6daf5c0e964897f9cc41" }
+protenix = { git = "https://github.com/escalante-bio/protenij.git", rev = "7cad393fd7c22a471953220bfb63c2048f6a2b6c" }
+esmjfold2 = { git = "https://github.com/escalante-bio/esmjfold2.git", rev = "1a6cbc8a459a436dd70ff93087d0bbd434d403b6" }
+
+[[tool.uv.dependency-metadata]]
+name = "salad"
+version = "0.1.2"
+requires-python = ">=3.9"
+requires-dist = [
+    "torch>=2.0",
+    "biopython",
+    "chex",
+    "immutabledict",
+    "ml-collections",
+    "numpy",
+    "scipy",
+    "tqdm",
+    "pydssp",
+    "jax>=0.6.0",
+    "dm-tree",
+    "dm-haiku>=0.0.16,<=0.0.18",
+    "flexloop @ git+https://github.com/mjendrusch/flexloop.git",
+    "gemmi",
+    "jax[cuda12]>=0.6.0; sys_platform == 'linux' and extra == 'cuda12'",
+    "jax[cuda13]>=0.6.0; sys_platform == 'linux' and extra == 'cuda13'",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "rfd4fx"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+requires-dist = [
+    "jax>=0.12",
+    "equinox>=0.13",
+    "einops>=0.8",
+    "jaxtyping>=0.3",
+    "numpy>=1.26",
+    "atomworks[ml]>=3.0.4",
+    "gemmi>=0.6.5",
+    "rdkit>=2024.3.5",
+    "networkx",
+    "zstandard",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "protenix"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+requires-dist = [
+    "biopython>=1.83",
+    "biotite>=1.2.0",
+    "einops>=0.8.0",
+    "equinox>=0.13.0",
+    "gemmi>=0.6.5",
+    "jax>=0.6.2",
+    "ml-collections>=1.1.0",
+    "modelcif>=0.7",
+    "numpy>=2.1.0",
+    "optree>=0.16.0",
+    "pandas>=2.3.1",
+    "pdbeccdutils>=0.8.5",
+    "protobuf>=4.25.0",
+    "pyyaml>=6.0.2",
+    "rdkit>=2025.3.3",
+    "safetensors>=0.5.3",
+    "scikit-learn>=1.6.0",
+    "scipy>=1.15.3",
+    "setuptools>=80.9.0",
+    "tqdm>=4.67.1",
+    "huggingface_hub>=0.20.0",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "esm"
+version = "3.4.1.post1"
+requires-python = ">=3.12"
+requires-dist = [
+    "torch<2.12.0,>=2.11.0",
+    "transformers<5.0.0,>=4.57.6",
+    "ipython",
+    "einops",
+    "biotite>=1.0.0",
+    "rdkit",
+    "msgpack-numpy",
+    "biopython",
+    "scikit-learn",
+    "brotli",
+    "attrs",
+    "pandas",
+    "cloudpathlib",
+    "httpx",
+    "tenacity",
+    "zstd",
+    "ipywidgets",
+    "py3dmol",
+    "pydssp",
+    "boto3",
+    "huggingface_hub",
+    "safetensors",
+    "pygtrie",
+    "dna_features_viewer",
+    "accelerate",
+]

@@ -9,8 +9,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from Bio.SeqUtils.IsoelectricPoint import IsoelectricPoint as IP
-
 import salad.inference as si
 from salad.modules.utils.dssp import assign_dssp
 from salad.inference.symmetry import Screw
@@ -31,11 +29,9 @@ from flexcraft.pipelines.utils import bias_dssp
 
 from flexcraft.pipelines.bind.common import (
     setup_dirs, config_from_opt, parse_target, parse_hotspots,
-    sample_centers_spaced, save_centers, setup_files, binder_step
+    sample_centers_spaced, save_centers, setup_files, binder_step, init_pyrosetta
 )
 from flexcraft.pipelines.bind.config import BINDER_OPT, PARAM_PATHS, DESIGN_OPT
-
-import pyrosetta as pr
 
 opt = parse_options(
     "Use salad to generate large protein complexes.",
@@ -112,9 +108,9 @@ filter = BindCraftProperties(
     ipae_shortcut_threshold=opt.ipae_shortcut_threshold)
 
 
-# set up pyrosetta
-pr.init(f'-ignore_unrecognized_res -ignore_zero_occupancy -mute all -holes:dalphaball {opt.alphaball_path} '
-        f'-corrections::beta_nov16 true -relax:default_repeats 1')
+# set up pyrosetta lazily when Rosetta filtering is enabled
+if opt.salad_only != "True":
+    init_pyrosetta(opt.alphaball_path)
 
 # set up output files
 success, all_designs = setup_files(opt.out_path)

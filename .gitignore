@@ -8,6 +8,8 @@ __pycache__/
 _*
 flexcraft_params/
 params/
+.venv/
+.pytest_cache/
 dependencies/
 slurm/
 slurm-*.out

@@ -49,7 +49,8 @@ def af_cycler(af_model, mpnn_model, confidence=None, fix_template=False, fix_all
         mpnn_input = mpnn_input.drop_aa(where=cycle_mask)
         mpnn_result = mpnn_model(key(), mpnn_input)
         logits = aas.translate_onehot(mpnn_result["logits"], aas.PMPNN_CODE, aas.AF2_CODE)
-        logits -= logits.mean(axis=0)
+        valid_mask = mpnn_input["mask"]
+        logits -= (logits * valid_mask[:, None]).sum(axis=0) / jnp.maximum(valid_mask.sum(), 1)
         logits = logits[:, :20]
         # update_sequence
         start_aa = jax.nn.one_hot(af_input["aatype"], 20, axis=-1)
@@ -59,7 +60,7 @@ def af_cycler(af_model, mpnn_model, confidence=None, fix_template=False, fix_all
         # results
         prediction = af_result.to_data()
         update = data.update(
-            aa=jnp.where(cycle_mask, new_aa, data["aa"]),
+            aa=jnp.where(cycle_mask & valid_mask, new_aa, data["aa"]),
             atom_positions=prediction["atom_positions"],
             atom_mask=prediction["atom_mask"].at[:, 6:].set(False))
         return update, prediction
@@ -68,8 +69,9 @@ def af_cycler(af_model, mpnn_model, confidence=None, fix_template=False, fix_all
 def contact_confidence(af_result: AFResult):
     p_contact = af_result.contact_probability()
     resi = af_result.inputs["residue_index"]
+    pad_mask = af_result.token_pad_mask
     distance = abs(resi[:, None] - resi[None, :])
-    pair_mask = distance > 9
+    pair_mask = (distance > 9) & pad_mask[:, None] & pad_mask[None, :]
     p_contact = jnp.where(pair_mask, p_contact, 0.0)
     score = jnp.sort(p_contact, axis=1)[:, -2:].mean(axis=1)
-    return score
+    return jnp.where(pad_mask, score, 0.0)

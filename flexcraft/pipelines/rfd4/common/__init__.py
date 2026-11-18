@@ -1,0 +1,71 @@
+"""Shared CLI, conditioning, geometry, and AF3Like prediction helpers for RFD4 pipelines."""
+
+from flexcraft.pipelines.rfd4.common.cli import (
+    add_forbidden_args,
+    add_gen_only_args,
+    discover_pdb_paths,
+    parse_bool,
+    parse_forbidden_aas,
+    prepare_output_dir,
+    setup_rfd4_output_dirs,
+)
+from flexcraft.pipelines.rfd4.common.conditioning import (
+    clamp_conditioned_aa,
+    decode_rfd4_tokens,
+    extract_binder_sequence,
+    extract_chain_sequences,
+    extract_target_sequences,
+    forbid_amino_acids,
+    sidechain_atom37_mask,
+)
+from flexcraft.pipelines.rfd4.common.geometry import (
+    BACKBONE_ATOMS,
+    BACKBONE_RMSD,
+    C2_SYMMETRY_SWAPS,
+    JIT_VMAP_BACKBONE_RMSD,
+    WATERS,
+    coupled_kabsch_sidechain_rmsd,
+    kabsch_rmsd,
+    kabsch_transform,
+)
+from flexcraft.pipelines.rfd4.common.prediction import (
+    build_af3_predictor,
+    extract_atom24_samples,
+    extract_residue_atom_dicts,
+    normalize_blank_chain_ids,
+    prepare_af3_protein_spec,
+    save_aligned_prediction_pdb,
+    write_gemmi_pdb,
+)
+
+__all__ = [
+    "BACKBONE_ATOMS",
+    "BACKBONE_RMSD",
+    "C2_SYMMETRY_SWAPS",
+    "JIT_VMAP_BACKBONE_RMSD",
+    "WATERS",
+    "add_forbidden_args",
+    "add_gen_only_args",
+    "build_af3_predictor",
+    "clamp_conditioned_aa",
+    "coupled_kabsch_sidechain_rmsd",
+    "decode_rfd4_tokens",
+    "discover_pdb_paths",
+    "extract_atom24_samples",
+    "extract_binder_sequence",
+    "extract_chain_sequences",
+    "extract_residue_atom_dicts",
+    "extract_target_sequences",
+    "forbid_amino_acids",
+    "kabsch_rmsd",
+    "kabsch_transform",
+    "normalize_blank_chain_ids",
+    "parse_bool",
+    "parse_forbidden_aas",
+    "prepare_af3_protein_spec",
+    "prepare_output_dir",
+    "save_aligned_prediction_pdb",
+    "setup_rfd4_output_dirs",
+    "sidechain_atom37_mask",
+    "write_gemmi_pdb",
+]

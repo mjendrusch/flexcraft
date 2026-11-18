@@ -1,45 +1,209 @@
 # adapted from mosaic ((c) 2025 escalante under MIT license)
-import shutil
-import gemmi
-from tempfile import NamedTemporaryFile
-from typing import Any, Literal, List, Tuple
 import os
+import shutil
+import warnings
+from dataclasses import asdict, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from dataclasses import asdict, replace
-from boltz.data.write.mmcif import to_mmcif
-from boltz.data.write.pdb import to_pdb
-import equinox as eqx
+from typing import Any, List, Literal, Tuple
+
 import boltz.data.const as const
 import boltz.main as boltz_main
-from boltz.data.types import StructureV2, Coords, Coords, Interface, Record
 import equinox as eqx
 import jax
-import joltz
 import numpy as np
 import torch
+from boltz.data.types import Coords, Interface, Record, StructureV2
+from boltz.data.write.mmcif import to_mmcif
+from boltz.data.write.pdb import to_pdb
 from jax import numpy as jnp
-from jaxtyping import Array, Float, PyTree
-from flexcraft.data.data import DesignData
-from flexcraft.files.pdb import PDBFile
-from flexcraft.structure.boltz._utils import *
+from jaxtyping import PyTree
+
+from flexcraft.structure.common._data import (
+    InputSpec,
+    ModelInput,
+    _AA_SLICE,
+    _AA_UNK,
+    _DNA_SLICE,
+    _DNA_UNK,
+    _RNA_SLICE,
+    _RNA_UNK,
+)
+from flexcraft.structure.common._utils import (
+    align_up,
+    backbone_to_template_geometry,
+    compute_pseudo_cb,
+    pad_features_by_schema,
+)
 
 
-def chain_yaml(chain_order: List[str], num_repeats: int = None, sequence: str = None,
-               ccd: str = None, smiles: str = None, kind: str = "protein", use_msa: bool = False,
-               **kwargs) -> str:
+def _ensemble_ref_axes(current_tokens: int):
+    def _axes(arr):
+        if arr.ndim >= 2 and arr.shape[1] == current_tokens:
+            return (None, "token") + (None,) * (arr.ndim - 2)
+        return (None,) * arr.ndim
+
+    return _axes
+
+
+def get_boltz_feature_schema(current_tokens: int | None = None) -> dict[str, Any]:
+    """Return explicit per-feature named-axis map for Boltz2 feature dicts."""
+    return {
+        "token_index": (None, "token"),
+        "residue_index": (None, "token"),
+        "asym_id": (None, "token"),
+        "entity_id": (None, "token"),
+        "sym_id": (None, "token"),
+        "mol_type": (None, "token"),
+        "res_type": (None, "token", None),
+        "disto_center": (None, "token", None),
+        "disto_coords_ensemble": lambda arr: (
+            (None, None, "token", None)
+            if arr.ndim == 4
+            else (None, "token", None)
+        ),
+        "disto_target": lambda arr: (
+            (None, "token", "token", None, None)
+            if arr.ndim == 5
+            else (None, "token", "token", None)
+        ),
+        "token_pad_mask": (None, "token"),
+        "token_resolved_mask": (None, "token"),
+        "token_disto_mask": (None, "token"),
+        "pocket_feature": lambda arr: (
+            (None, "token", None) if arr.ndim == 3 else (None, "token")
+        ),
+        "method_feature": (None, "token"),
+        "modified": (None, "token"),
+        "cyclic_period": (None, "token"),
+        "affinity_token_mask": (None, "token"),
+        "profile": (None, "token", None),
+        "deletion_mean": (None, "token"),
+        "ensemble_ref_idxs": (
+            _ensemble_ref_axes(current_tokens)
+            if current_tokens is not None
+            else (None, "token")
+        ),
+        "frames_idx": lambda arr: (
+            (None, None, "token", None)
+            if arr.ndim == 4
+            else (None, "token", None)
+        ),
+        "frame_resolved_mask": lambda arr: (
+            (None, None, "token") if arr.ndim == 3 else (None, "token")
+        ),
+        "token_bonds": lambda arr: (
+            (None, "token", "token", None)
+            if arr.ndim == 4
+            else (None, "token", "token")
+        ),
+        "type_bonds": (None, "token", "token"),
+        "contact_conditioning": (None, "token", "token", None),
+        "contact_threshold": (None, "token", "token"),
+        "pair_mask": (None, "token", "token"),
+        "atom_pad_mask": (None, "atom"),
+        "atom_resolved_mask": lambda arr: (
+            (None, None, "atom") if arr.ndim == 3 else (None, "atom")
+        ),
+        "atom_to_token": (None, "atom", "token"),
+        "token_to_rep_atom": (None, "token", "atom"),
+        "token_to_center_atom": (None, "token", "atom"),
+        "r_set_to_rep_atom": (None, "token", "atom"),
+        "ref_pos": (None, "atom", None),
+        "ref_space_uid": (None, "atom"),
+        "ref_charge": (None, "atom"),
+        "ref_element": (None, "atom", None),
+        "ref_atom_name_chars": (None, "atom", None, None),
+        "ref_chirality": (None, "atom"),
+        "atom_backbone_feat": (None, "atom", None),
+        "coords": lambda arr: (
+            (None, None, "atom", None)
+            if arr.ndim == 4
+            else (None, "atom", None)
+        ),
+        "bfactor": (None, "atom"),
+        "plddt": (None, "atom"),
+        "msa": (None, "msa", "token", None),
+        "msa_mask": (None, "msa", "token"),
+        "msa_paired": (None, "msa", "token"),
+        "has_deletion": (None, "msa", "token"),
+        "deletion_value": (None, "msa", "token"),
+        "template_frame_rot": (None, "template", "token", None, None),
+        "template_frame_t": (None, "template", "token", None),
+        "template_ca": (None, "template", "token", None),
+        "template_cb": (None, "template", "token", None),
+        "template_mask": (None, "template", "token"),
+        "template_mask_cb": (None, "template", "token"),
+        "template_mask_frame": (None, "template", "token"),
+        "template_restype": (None, "template", "token", None),
+        "visibility_ids": (None, "template", "token"),
+        "query_to_template": (None, "template", "token"),
+        "template_force": (None, "template"),
+        "template_force_threshold": (None, "template"),
+    }
+
+
+BOLTZ_PAD_VALUES = {
+    "contact_conditioning": lambda arr: (
+        jnp.zeros((arr.shape[-1],), dtype=arr.dtype).at[0].set(1.0)
+        if isinstance(arr, jax.Array)
+        else np.array(
+            [1.0] + [0.0] * (arr.shape[-1] - 1), dtype=arr.dtype
+        )
+    ),
+    "asym_id": -1,
+    "entity_id": -1,
+    "ref_space_uid": -1,
+    "visibility_ids": -1.0,
+    "ensemble_ref_idxs": -1.0,
+    "token_pad_mask": 0.0,
+    "atom_pad_mask": 0.0,
+    "msa_mask": 0.0,
+    "template_mask": 0.0,
+    "template_mask_cb": 0.0,
+    "template_mask_frame": 0.0,
+}
+
+
+def align_boltz_atoms_w32(features: dict) -> dict:
+    """Ensure Boltz atom-axis features have `N_atoms % 32 == 0`."""
+    if "atom_pad_mask" not in features:
+        return features
+    current_atoms = int(features["atom_pad_mask"].shape[1])
+    target_atoms = align_up(max(current_atoms, 32), 32)
+    if target_atoms == current_atoms:
+        return features
+    current_tokens = (
+        int(features["res_type"].shape[1]) if "res_type" in features else None
+    )
+    return pad_features_by_schema(
+        features,
+        axis_targets={"atom": target_atoms},
+        schema=get_boltz_feature_schema(current_tokens),
+        pad_values=BOLTZ_PAD_VALUES,
+    )
+
+
+def chain_yaml(
+    chain_order: List[str],
+    num_repeats: int = None,
+    sequence: str = None,
+    ccd: str = None,
+    smiles: str = None,
+    kind: str = "protein",
+    use_msa: bool = False,
+    **kwargs,
+) -> str:
     if num_repeats is None:
         num_repeats = 1
-    chain_names = [chain_order.pop(0) for i in range(num_repeats)]
+    chain_names = [chain_order.pop(0) for _ in range(num_repeats)]
     chain_name = ", ".join(chain_names)
     if ccd is not None:
-        kind = "ligand"
         result = f"""  - ligand:
         id: [{chain_name}]
         ccd: {ccd}"""
         use_msa = False
     elif smiles is not None:
-        kind = "ligand"
         result = f"""  - ligand:
         id: [{chain_name}]
         smiles: {smiles}"""
@@ -51,24 +215,21 @@ def chain_yaml(chain_order: List[str], num_repeats: int = None, sequence: str = 
     if not use_msa:
         result += """
         msa: empty"""
-
     return result
+
 
 def _prefix():
     return """version: 1
 sequences:"""
 
-def _make_features(chains: list, templates: list, constraints: list,
-                   cache="./params/boltz/"):
-    chain_order = [c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
+
+def _make_features(
+    chains: list, templates: list, constraints: list, cache="./params/boltz/"
+):
+    chain_order = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
     yaml = "\n".join(
-        [_prefix()]
-        + [
-            chain_yaml(chain_order, **c)
-            for c in chains
-        ]
+        [_prefix()] + [chain_yaml(chain_order, **c) for c in chains]
     )
-    chain_order = [c for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"]
     has_template, template_yaml = build_template_yaml(templates)
     if has_template:
         yaml += template_yaml
@@ -80,189 +241,36 @@ def _make_features(chains: list, templates: list, constraints: list,
         assert np.sum(features["template_mask"]) > 0
     return features, writer_spec
 
-class JoltzSpec:
-    def __init__(self, *chains, templates=None, constraints=None):
-        self.chains = list(chains)
-        self.templates = templates or list()
-        self.constraints = constraints or list()
-        self.temporaries = list()
-        self.precomputed_msas = list()
 
-    def add_chain(self, *chains):
-        _chains = []
-        for c in chains:
-            if isinstance(c, DesignData):
-                subchains = c.split(c["chain_index"])
-                for s in subchains:
-                    _chains.append(dict(
-                        sequence=s.to_sequence_string(),
-                        kind="protein",
-                        use_msa=False
-                    ))
-            else:
-                _chains.append(c)
-        self.chains += _chains
-        return self
-
-    def add_polymer(self, *sequences, kind="protein", use_msa=False, num_repeats=1):
-        _chains = []
-        for c in sequences:
-            subchains = c.split(":")
-            for s in subchains:
-                _chains.append(dict(
-                    sequence=s,
-                    kind=kind,
-                    use_msa=use_msa,
-                    num_repeats=num_repeats
-                ))
-        return self.add_chain(*_chains)
-
-    def add_protein(self, *sequences, use_msa=False, num_repeats=1):
-        return self.add_polymer(*sequences, kind="protein", use_msa=use_msa, num_repeats=num_repeats)
-
-    def add_dna(self, *sequences, use_msa=False, num_repeats=1):
-        return self.add_polymer(*sequences, kind="dna", use_msa=use_msa, num_repeats=num_repeats)
-
-    def add_rna(self, *sequences, use_msa=False, num_repeats=1):
-        return self.add_polymer(*sequences, kind="rna", use_msa=use_msa, num_repeats=num_repeats)
-
-    def add_smiles(self, smiles, num_repeats=1):
-        _chains = [
-            dict(kind="ligand", smiles=smiles, num_repeats=num_repeats)
+class JoltzSpec(InputSpec):
+    def to_features(self, pad=True, cache="./params/boltz/"):
+        chains = [
+            {**c, "use_msa": False} if self.precomputed_msas else dict(c)
+            for c in self.chains
         ]
-        return self.add_chain(*_chains)
-
-    def add_ccd(self, ccd, num_repeats=1):
-        _chains = [
-            dict(kind="ligand", ccd=ccd, num_repeats=num_repeats)
-        ]
-        return self.add_chain(*_chains)
-
-    def add_template(self, path_or_object, to_chains=None):
-        # TODO: gemmi-based template sanitization
-        template_info = dict(template=path_or_object, template_chains=to_chains)
-        if isinstance(path_or_object, str):
-            if path_or_object.endswith((".pdb", ".pdb1")):
-                template_info["pdb"] = path_or_object
-            elif path_or_object.endswith(".cif"):
-                template_info["cif"] = path_or_object
-            else:
-                raise NotImplementedError(f"Invalid template file '{path_or_object}'. "
-                                          f"Has to be either '.pdb' or '.cif'.")
-        elif isinstance(path_or_object, DesignData):
-            tmpfile = PDBFile(data = path_or_object, temporary = True)
-            # ref_st = gemmi.read_structure(tmpfile.path)
-            # st = gemmi.Structure()
-            # model = gemmi.Model("0")
-            # entities = []
-
-            # ref_model: gemmi.Model = [m for m in ref_st][0]
-            # for chain in ref_model:
-            #     chain: gemmi.Chain
-            #     chain_id = chain.name
-            #     ent = gemmi.Entity(chain_id)
-            #     ent.entity_type = gemmi.EntityType.Polymer
-            #     ent.polymer_type = gemmi.PolymerType.PeptideL
-            #     ent.subchains = [chain_id]
-            #     ent.full_sequence = [r.name for r in chain]
-            #     entities.append(ent)
-            #     for r in chain:
-            #         r: gemmi.Residue
-            #         r.subchain = chain_id
-            #     model.add_chain(chain)
-
-            # st.add_model(model)
-            # st.entities = gemmi.EntityList(entities)
-            # st.assign_subchains()
-            # st.setup_entities()
-            # st.ensure_entities()
-            # st.assign_label_seq_id()
-
-            # tf = NamedTemporaryFile(suffix=".cif")
-
-            # st.setup_entities()
-            # doc = st.make_mmcif_document()
-            # doc.write_file(tf.name)
-            self.temporaries.append(tmpfile)
-            template_info["cif"] = tmpfile.path
-        else:
-            raise NotImplementedError(
-                "Input template has to be a path to a '.pdb' or '.cif' file.")
-        self.templates.append(template_info)
-        return self
-
-    def add_msa(self, to_chains=None):
-        if to_chains is None:
-            to_chains = list(range(len(self.chains)))
-        for c in to_chains:
-            chain = self.chains[c]
-            if not all(x == "X" for x in chain["sequence"]):
-                self.chains[c]["use_msa"] = True
-        return self
-
-    def precomputed_msa(self, path, start_chain=0):
-        offset = 0
-        for chain in self.chains[:start_chain]:
-            offset += len(chain["sequence"]) * chain.get("num_repeats", 1)
-        self.precomputed_msas.append(dict(path=path, offset=offset))
-        for chain in self.chains:
-            chain["use_msa"] = False
-        return self
-
-    def add_bond(self, chain_1, residue_1, atom_1,
-                 chain_2, residue_2, atom_2):
-        self.constraints.append(dict(
-            kind="bond",
-            atom_1=dict(chain=chain_1, residue=residue_1, atom=atom_1),
-            atom_2=dict(chain=chain_2, residue=residue_2, atom=atom_2)))
-        return self
-
-    def add_contact(self, chain_1, residue_or_atom_1,
-                    chain_2, residue_or_atom_2, max_distance=6.0):
-        self.constraints.append(dict(
-            kind="contact",
-            token_1=dict(chain=chain_1, target=residue_or_atom_1),
-            token_2=dict(chain=chain_2, target=residue_or_atom_2),
-            max_distance=max_distance
-        ))
-        return self
-
-    def add_pocket(self, binder, *contacts, max_distance=6.0):
-        self.constraints.append(dict(
-            kind="pocket",
-            binder=binder,
-            contacts=contacts,
-            max_distance=max_distance
-        ))
-        return self
-
-    def add_constraint(self, constraint):
-        self.constraints.append(constraint)
-        return self
-
-    def to_features(self, pad=True, cache="./params/boltz/") -> dict:
         features, writer_spec = _make_features(
-            self.chains, self.templates, self.constraints, cache=cache)
-        if pad:
-            features = pad_boltz_atom_features_for_compilation(features)
+            chains, self.templates, self.constraints, cache=cache
+        )
         writer_features = {
             k: torch.tensor(np.array(v))
-            for k, v in features.items() if k != "record"
+            for k, v in features.items()
+            if k != "record"
         }
         writer_features["record"] = writer_spec["features_dict"]["record"]
         writer_spec["features_dict"] = writer_features
         features = jax.tree.map(jnp.array, features)
+        features = align_boltz_atoms_w32(features)
         return features, writer_spec
 
-    def to_input(self, pad=True, cache="./params/boltz/") -> Tuple["JoltzInput", "Joltz2Writer"]:
-        if self.precomputed_msas:
-            for chain in self.chains:
-                chain["use_msa"] = False
+    def to_input(
+        self, pad=True, cache="./params/boltz/"
+    ) -> Tuple["JoltzInput", "Joltz2Writer"]:
         features, writer_spec = self.to_features(pad=pad, cache=cache)
         joltz_input = JoltzInput(features=features)
         if self.precomputed_msas:
             for msa in self.precomputed_msas:
                 joltz_input = joltz_input.load_msa(msa["path"], msa["offset"])
+        joltz_input = self._apply_pad_spec(joltz_input)
         joltz_writer = Joltz2Writer(**writer_spec)
         return joltz_input, joltz_writer
 
@@ -270,223 +278,273 @@ class JoltzSpec:
         joltz_input, _ = self.to_input(pad=False, cache=cache)
         joltz_input.save_msa(path)
 
-_AA_SLICE = slice(2, 22)
-_AA_UNK = 22
-_RNA_SLICE = slice(23, 27)
-_RNA_UNK = 27
-_DNA_SLICE = slice(28, 32)
-_DNA_UNK = 32
 
-class JoltzInput(eqx.Module):
+class JoltzInput(ModelInput):
     features: dict
-    @property
-    def residue_index(self):
-        return self.features["residue_index"][0]
-    @property
-    def chain_index(self):
-        return self.features["asym_id"][0]
-    @property
-    def residue_type(self):
-        return jnp.argmax(self.features["res_type"][0], axis=-1)
 
-    def copy(self):
-        result = JoltzInput(features={k: v for k, v in self.features.items()})
-        return result
+    def __init__(self, features: dict):
+        if (
+            isinstance(features, dict)
+            and "atom_pad_mask" in features
+            and features["atom_pad_mask"].shape[1] % 32 != 0
+        ):
+            features = align_boltz_atoms_w32(features)
+        self.features = features
 
-    def _set_res_type(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20):
+    def pad_to(
+        self,
+        size: int | None,
+        num_residue_atoms: int = 24,
+        *,
+        num_msa: int | None = None,
+        num_templates: int | None = None,
+    ) -> "JoltzInput":
+        """Right-pad token, atom (`W=32`), MSA, and template axes monotonically."""
+        current_tokens = int(self.features["res_type"].shape[1])
+        current_atoms = int(self.features["atom_pad_mask"].shape[1])
+
+        if size is None:
+            target_tokens = current_tokens
+            target_atoms = align_up(max(current_atoms, 32), 32)
+        elif size < current_tokens:
+            warnings.warn(
+                f"Requested token pad size {size} < current token count "
+                f"{current_tokens}; keeping {current_tokens} tokens.",
+                UserWarning,
+                stacklevel=2,
+            )
+            target_tokens = current_tokens
+            target_atoms = align_up(max(current_atoms, 32), 32)
+        else:
+            target_tokens = int(size)
+            requested_atoms = int(num_residue_atoms) * target_tokens
+            if current_atoms > requested_atoms:
+                warnings.warn(
+                    f"Current atom count {current_atoms} exceeds "
+                    f"num_residue_atoms * target_tokens ({requested_atoms}); "
+                    f"keeping aligned atom count.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            target_atoms = align_up(max(current_atoms, requested_atoms, 32), 32)
+
+        axis_targets = {"token": target_tokens, "atom": target_atoms}
+
+        if num_msa is not None and "msa" in self.features:
+            current_msa = int(self.features["msa"].shape[1])
+            if num_msa < current_msa:
+                warnings.warn(
+                    f"Requested num_msa {num_msa} < current MSA depth "
+                    f"{current_msa}; keeping {current_msa}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                axis_targets["msa"] = int(num_msa)
+
+        if num_templates is not None and "template_mask" in self.features:
+            current_templates = int(self.features["template_mask"].shape[1])
+            if num_templates < current_templates:
+                warnings.warn(
+                    f"Requested num_templates {num_templates} < current "
+                    f"template count {current_templates}; keeping {current_templates}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                axis_targets["template"] = int(num_templates)
+
+        padded_features = pad_features_by_schema(
+            self.features,
+            axis_targets=axis_targets,
+            schema=get_boltz_feature_schema(current_tokens),
+            pad_values=BOLTZ_PAD_VALUES,
+        )
+        return JoltzInput(features=padded_features)
+
+    def inherit_msa(
+        self,
+        data: "JoltzInput",
+        start: int = 0,
+        msa_start: int = 0,
+        msa_end: int | None = None,
+    ) -> "JoltzInput":
+        """Return a copy inheriting MSA features from `data`."""
+        msa_keys = (
+            "msa",
+            "msa_mask",
+            "profile",
+            "deletion_mean",
+            "has_deletion",
+            "deletion_value",
+            "msa_paired",
+        )
+        src_msa = data.features["msa"]
+        dst_msa = self.features["msa"]
+        if (
+            start == 0
+            and msa_start == 0
+            and msa_end is None
+            and src_msa.shape[2] == dst_msa.shape[2]
+            and src_msa.shape[1] >= dst_msa.shape[1]
+        ):
+            return self.inherit_features(data, features=msa_keys)
+
         result = self.copy()
-        result.features["res_type"] = jnp.array(result.features["res_type"]).astype(jnp.float32)
-        result.features["res_type"] = result.features["res_type"].at[0, start:start + sequence.shape[0]].set(0.0)
-        result.features["res_type"] = result.features["res_type"].at[0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count])
-        return result
-
-    def _set_profile(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20):
-        result = self.copy()
-        num_msa = result.features["msa"].shape[1]
-        result.features["profile"] = jnp.array(result.features["profile"]).astype(jnp.float32)
-        result.features["profile"] = result.features["profile"].at[0, start:start + sequence.shape[0]].set(0.0)
-        result.features["profile"] = result.features["profile"].at[0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count] / num_msa)
-        result.features["profile"] = result.features["profile"].at[0, start:start + sequence.shape[0], 1].set((num_msa - 1) / num_msa)
-        return result
-
-    def _set_msa(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20):
-        result = self.copy()
-        result.features["msa"] = jnp.array(result.features["msa"]).astype(jnp.float32)
-        # reset MSA for all positions we're setting:
-        # setting all msa positions to zero
-        result.features["msa"] = result.features["msa"].at[0, :, start:start + sequence.shape[0]].set(0.0)
-        # setting all msa positions from the 2nd sequence onwards to "-"
-        result.features["msa"] = result.features["msa"].at[0, 1:, start:start + sequence.shape[0], 1].set(1.0)
-        # finally, setting the first sequence to the input sequence
-        result.features["msa"] = result.features["msa"].at[0, 0, start:start + sequence.shape[0], seq_slice].set(sequence[:, :seq_count])
-        return result
-
-    def _set_sequence(self, sequence, start=0, seq_slice=_AA_SLICE, seq_count=20,
-                      reset_msa=True, reset_profile=True):
-        result = self.copy()
-        result = result._set_res_type(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
-        if reset_profile:
-            result = result._set_profile(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
-        if reset_msa:
-            result = result._set_msa(sequence, start=start, seq_slice=seq_slice, seq_count=seq_count)
-        return result
-
-    def set_aa(self, sequence, start=0, reset_msa=True, reset_profile=True):
-        return self._set_sequence(sequence, start=start,
-                                  reset_msa=reset_msa,
-                                  reset_profile=reset_profile)
-
-    def inherit_msa(self, data: "JoltzInput"):
-        self.features["msa"] = data.features["msa"]
-        self.features["msa_mask"] = data.features["msa_mask"]
-        self.features["profile"] = data.features["profile"]
-        self.features["deletion_mean"] = data.features["deletion_mean"]
-        self.features["has_deletion"] = data.features["has_deletion"]
-        self.features["deletion_value"] = data.features["deletion_value"]
-        self.features["msa_paired"] = data.features["msa_paired"]
-        return self
-
-    def save_msa(self, path: str) -> "JoltzInput":
-        np.savez_compressed(
-            path, 
-            msa = self.features["msa"],
-            msa_mask = self.features["msa_mask"],
-            profile = self.features["profile"],
-            has_deletion = self.features["has_deletion"],
-            deletion_value = self.features["deletion_value"],
-            deletion_mean = self.features["deletion_mean"],
-            msa_paired = self.features["msa_paired"])
-        return self
-
-    def load_msa(self, path: str, start=0, msa_start=0, msa_end=None) -> "JoltzInput":
-        msa_features = np.load(path)
-        result = self.copy()
-        msa_names = ["msa", "msa_mask", "msa_paired", "has_deletion", "deletion_value"]
-        # sequence_names = ["profile", "deletion_mean"]
-        msa = msa_features["msa"]
-        msa_length = msa[:, :, msa_start:msa_end].shape[2]
-        sequence_count = msa.shape[1]
-        current_sequence_count = self.features["msa"].shape[1]
-        # pad current features to number of msa sequences
-        for name in msa_names:
+        msa_slice = src_msa[:, :, msa_start:msa_end]
+        msa_length = int(msa_slice.shape[2])
+        sequence_count = int(msa_slice.shape[1])
+        current_sequence_count = int(dst_msa.shape[1])
+        tok_mask = jnp.asarray(
+            result.features["token_pad_mask"], dtype=jnp.float32
+        )
+        row_names = (
+            "msa",
+            "msa_mask",
+            "msa_paired",
+            "has_deletion",
+            "deletion_value",
+        )
+        for name in row_names:
+            arr = jnp.asarray(result.features[name])
             if sequence_count > current_sequence_count:
                 difference = sequence_count - current_sequence_count
                 padding = jnp.zeros(
-                    [1, difference] + list(result.features[name].shape[2:]),
-                    dtype=result.features[name].dtype)
-                # make padded msa all gaps
+                    [1, difference] + list(arr.shape[2:]),
+                    dtype=arr.dtype,
+                )
                 if name == "msa":
-                    padding = padding.at[..., 1].set(1)
-                # adjust msa mask
-                if name == "msa_mask":
-                    padding = padding.at[0].set(msa_features["msa_mask"][0, -difference:, 0:1])
-                result.features[name] = jnp.concatenate(
-                    (result.features[name], padding), axis=1)
-            result.features[name] = result.features[name].at[0, :, start:start + msa_length].set(msa_features[name][0, :, msa_start:msa_end])
-        result.features["profile"] = result.features["msa"].mean(axis=1)
-        result.features["deletion_mean"] = result.features["deletion_value"].mean(axis=1)
+                    padding = padding.at[..., 1].set(
+                        tok_mask[:, None, :].astype(arr.dtype)
+                    )
+                elif name == "msa_mask":
+                    row_active = (
+                        jnp.asarray(
+                            data.features["msa_mask"][
+                                0, -difference:, msa_start:msa_end
+                            ]
+                        )
+                        > 0
+                    ).any(axis=-1)
+                    padding = (
+                        row_active[None, :, None] & (tok_mask[:, None, :] > 0)
+                    ).astype(arr.dtype)
+                arr = jnp.concatenate([arr, padding], axis=1)
+            src_slice = jnp.asarray(
+                data.features[name][0, :, msa_start:msa_end], dtype=arr.dtype
+            )
+            arr = arr.at[0, :sequence_count, start : start + msa_length].set(
+                src_slice
+            )
+            result.features[name] = arr
+
+        weights = jnp.asarray(result.features["msa_mask"], dtype=jnp.float32)
+        denom = jnp.maximum(1.0, weights.sum(axis=1))
+        profile = (
+            jnp.asarray(result.features["msa"], dtype=jnp.float32)
+            * weights[..., None]
+        ).sum(axis=1) / denom[..., None]
+        deletion_mean = (
+            jnp.asarray(result.features["deletion_value"], dtype=jnp.float32)
+            * weights
+        ).sum(axis=1) / denom
+        result.features["profile"] = profile * tok_mask[..., None]
+        result.features["deletion_mean"] = deletion_mean * tok_mask
         return result
 
-    def set_msa(self, msa, start=0):
-        result = self.copy()
-        result.features["msa"] = jnp.array(result.features["msa"]).astype(jnp.float32)
-        # reset MSA for all positions we're setting:
-        # setting all msa positions to zero
-        result.features["msa"] = result.features["msa"].at[0, :, start:start + msa.shape[1]].set(0.0)
-        # setting all msa positions from the 2nd sequence onwards to "-"
-        result.features["msa"] = result.features["msa"].at[0, 1:, start:start + msa.shape[1], 1].set(1.0)
-        # finally, setting the first sequence to the input sequence
-        result.features["msa"] = result.features["msa"].at[0, 0:msa.shape[0], start:start + msa.shape[1], :].set(msa)
-        # compute & set the profile
-        result.features["profile"] = result.features["msa"].at[0, start:start + msa.shape[1]].set(msa.mean(axis=0))
-        return result
+    def save_msa(self, path: str) -> "JoltzInput":
+        return self.save_features(
+            path,
+            features=(
+                "msa",
+                "msa_mask",
+                "profile",
+                "has_deletion",
+                "deletion_value",
+                "deletion_mean",
+                "msa_paired",
+            ),
+        )
 
-    def set_aa_msa(self, msa, start=0):
-        if msa.shape[-1] == 20:
-            msa_size = self.features["msa"].shape[-1]
-            seq_start = 2
-            msa = jnp.pad(msa, ((0, 0), (0, 0), (seq_start, msa_size - 20)))
-        aa = msa[0]
-        aa = aa[..., 2:22]
-        return self.set_aa(aa, start=start).set_msa(msa, start=start)
-
-    def set_aa_msa_random(self, key, msa, start=0):
-        index = jax.random.permutation(key, msa.shape[0])
-        msa = msa[index]
-        return self.set_aa_msa(msa, start=start)
-
-    def set_rna(self, sequence, start=0):
-        return self._set_sequence(sequence, start=start, seq_slice=_RNA_SLICE, seq_count=4)
-    
-    def set_dna(self, sequence, start=0):
-        return self._set_sequence(sequence, start=start, seq_slice=_DNA_SLICE, seq_count=4)
-
-    def set_template(self, coords=None, start=0,
-                     template=None, mask=None,
-                     restype=None, template_id=0) -> "JoltzInput":
-        """
-        Set template from coordinates without needing a cif. 
-        coords are assumed to be (L, x, 3) with the backbone atoms N, Ca, C at 0,1,2.
-        Start: query token offset where template region begins.
-        mask: (L,) mask of which residues are present in the template. None means all residues are present.
-        restype: (L,), (L, 20), or (L, 33). Integer DesignData/AF2 residue types,
-        standard-AA one-hot, Boltz-token one-hot, or None to use query residues.
-        template_id: which slot of template features to set. 0 for the single block in the dummy (T=1).
-        """
+    def set_template(
+        self,
+        coords=None,
+        start=0,
+        template=None,
+        mask=None,
+        restype=None,
+        template_id=0,
+    ) -> "JoltzInput":
+        """Set template geometry directly from `(L, >=4, 3)` coordinates."""
         result = self.copy()
         if template is not None:
             result.features.update(template)
-            result.features["template_restype"] = result.features["template_restype"].at[0].set(result.features["res_type"][0])
+            result.features["template_restype"] = (
+                result.features["template_restype"]
+                .at[0]
+                .set(result.features["res_type"][0])
+            )
             return result
-        L = coords.shape[0]
-        sl = slice(start, start + L)
+        length = coords.shape[0]
+        sl = slice(start, start + length)
         tid = template_id
-        
-        rot, t = backbone_to_template_geometry(coords) # (L, 3, 3), (L, 3), t is just Ca
-        cb = compute_pseudo_cb(coords) # (L, 3)
-        
-        # sanity check: positions are only valid if cb is there and if wanted in case a mask is given, sanity check is not really relevant for predicted structures but rather partially resolved structures
-        finite = jnp.isfinite(coords[:,:3]).all(axis=(1,2))         # (L,)
-        m = finite if mask is None else (mask.astype(bool) & finite) # (L,)
-        m = m.astype(bool)
-        keep = m[:, None]
-        rot = jnp.where(keep[..., None], rot, 0.0) # (L, 3, 3)
-        t = jnp.where(keep, t, 0.0)                 # (L, 3)
-        cb = jnp.where(keep, cb, 0.0)                 # (L, 3)
-        
+
+        rot, trans = backbone_to_template_geometry(coords)
+        cb = compute_pseudo_cb(coords)
+
+        finite = jnp.isfinite(coords[:, :3]).all(axis=(1, 2))
+        valid = finite if mask is None else (mask.astype(bool) & finite)
+        valid = valid.astype(bool)
+        keep = valid[:, None]
+        rot = jnp.where(keep[..., None], rot, 0.0)
+        trans = jnp.where(keep, trans, 0.0)
+        cb = jnp.where(keep, cb, 0.0)
+
         if restype is None:
-            restype = result.features["res_type"][0, sl] # (L, 33), reuses query if no other sequence is given
+            restype = result.features["res_type"][0, sl]
         elif restype.ndim == 1:
             restype = jnp.asarray(restype)
             restype = jnp.where(restype == 20, _AA_UNK, restype + 2)
             restype = jax.nn.one_hot(restype, 33)
         elif restype.shape[-1] == 20:
-            restype = jnp.pad(restype, ((0, 0), (2, 11))) # pad to 33 tokens if restype is given as 20 tokens
+            restype = jnp.pad(restype, ((0, 0), (2, 11)))
         elif restype.shape[-1] != 33:
-            raise ValueError(f"restype must be shape (L,), (L, 20), or (L, 33), got {restype.shape}")
+            raise ValueError(
+                f"restype must be shape (L,), (L, 20), or (L, 33), got {restype.shape}"
+            )
         restype = restype.astype(jnp.float32)
-        
-        asym = result.features["asym_id"][0] # (N,)
-        in_region_chain = (asym[:, None] == asym[sl][None, :]).any(axis=1)    # (N,)
-        vis = jnp.where(in_region_chain, float(tid), (-1.0 - asym)).astype(jnp.float32)  # (N,)
-        
-        N = result.features["template_mask"].shape[2]
-        assert start + L <= N, f"template region {start}:{start+L} exceeds {N} tokens"
 
-        # write to features
+        asym = result.features["asym_id"][0]
+        valid_tok = result.features["token_pad_mask"][0] > 0
+        in_region_chain = valid_tok & (
+            asym[:, None] == asym[sl][None, :]
+        ).any(axis=1)
+        vis = jnp.where(
+            ~valid_tok,
+            -1.0,
+            jnp.where(in_region_chain, float(tid), (-1.0 - asym)),
+        ).astype(jnp.float32)
+
+        num_tokens = result.features["template_mask"].shape[2]
+        assert (
+            start + length <= num_tokens
+        ), f"template region {start}:{start + length} exceeds {num_tokens} tokens"
+
         writes = [
-                ("template_frame_rot",  rot,     (0, tid, sl)),
-                ("template_frame_t",    t,       (0, tid, sl)),
-                ("template_ca",         t,       (0, tid, sl)),   # CA == frame translation
-                ("template_cb",         cb,      (0, tid, sl)),
-                ("template_mask",       m,       (0, tid, sl)),
-                ("template_mask_cb",    m,       (0, tid, sl)),
-                ("template_mask_frame", m,       (0, tid, sl)),
-                ("template_restype",    restype, (0, tid, sl)),
-                ("visibility_ids",      vis,     (0, tid)),        # whole token row
-            ]
+            ("template_frame_rot", rot, (0, tid, sl)),
+            ("template_frame_t", trans, (0, tid, sl)),
+            ("template_ca", trans, (0, tid, sl)),
+            ("template_cb", cb, (0, tid, sl)),
+            ("template_mask", valid, (0, tid, sl)),
+            ("template_mask_cb", valid, (0, tid, sl)),
+            ("template_mask_frame", valid, (0, tid, sl)),
+            ("template_restype", restype, (0, tid, sl)),
+            ("visibility_ids", vis, (0, tid)),
+        ]
         for k, value, idx in writes:
-            result.features[k] = jnp.asarray(result.features[k], jnp.float32).at[idx].set(value)
+            result.features[k] = (
+                jnp.asarray(result.features[k], jnp.float32).at[idx].set(value)
+            )
 
         return result
 
@@ -502,8 +560,10 @@ class JoltzInput(eqx.Module):
                 "template_mask",
                 "template_mask_cb",
                 "template_mask_frame",
-                "visibility_ids",)
+                "visibility_ids",
+            )
         }
+
 
 def substitute_aa(features, aa_one_hot):
     features["res_type"] = jnp.array(features["res_type"]).astype(jnp.float32)
@@ -513,47 +573,60 @@ def substitute_aa(features, aa_one_hot):
     assert aa_one_hot.shape[1] == 20
     binder_len = aa_one_hot.shape[0]
 
-    # We only use the standard 20 amino acids, but boltz has 33 total tokens.
-    # zero out non-standard AA types
     zero_padded_sequence = jnp.pad(aa_one_hot, ((0, 0), (2, 11)))
-    n_msa = features["msa"].shape[1]
+    if "msa_mask" in features:
+        n_msa = jnp.maximum(
+            1.0,
+            jnp.asarray(features["msa_mask"][0, :, :binder_len], jnp.float32).sum(
+                axis=0
+            )[:, None],
+        )
+    else:
+        n_msa = float(features["msa"].shape[1])
 
-    # We assume there are no MSA hits for the binder sequence
     binder_profile = jnp.zeros_like(features["profile"][0, :binder_len])
-    binder_profile = binder_profile.at[:binder_len].set(zero_padded_sequence) / n_msa
-    binder_profile = binder_profile.at[:, 1].set((n_msa - 1) / n_msa)
+    binder_profile = (
+        binder_profile.at[:binder_len].set(zero_padded_sequence) / n_msa
+    )
+    binder_profile = binder_profile.at[:, 1].set(
+        jnp.squeeze((n_msa - 1.0) / n_msa)
+    )
 
     return features | {
         "res_type": features["res_type"]
-            .at[0, :binder_len, :]
-            .set(zero_padded_sequence),
-        "msa": features["msa"].at[0, 0, :binder_len, :].set(zero_padded_sequence),
+        .at[0, :binder_len, :]
+        .set(zero_padded_sequence),
+        "msa": features["msa"]
+        .at[0, 0, :binder_len, :]
+        .set(zero_padded_sequence),
         "profile": features["profile"].at[0, :binder_len].set(binder_profile),
     }
 
+
 def build_chain_template_yaml(chain_order: List[str], chains: list):
-    # TODO: allow setting more fine-grained templates + PDB files
     num_templates = 0
     template_yaml = """
         
 templates:"""
     for chain in chains:
-        chain: dict
         num_repeats = chain.get("num_repeats", 1)
-        if not "template_file" in chain:
-            for i in range(num_repeats):
+        if "template_file" not in chain:
+            for _ in range(num_repeats):
                 chain_order.pop(0)
             continue
-        if chain["template_file"] is None or not os.path.isfile(chain["template_file"]):
-            for i in range(num_repeats):
+        if chain["template_file"] is None or not os.path.isfile(
+            chain["template_file"]
+        ):
+            for _ in range(num_repeats):
                 chain_order.pop(0)
             continue
         num_templates += 1
         template_yaml += f"""
   - cif: {chain['template_file']}
-    chain_id: [{', '.join([chain_order.pop(0) for i in range(num_repeats)])}]
+    chain_id: [{', '.join([chain_order.pop(0) for _ in range(num_repeats)])}]
 """
     return num_templates, template_yaml
+
 
 def build_template_yaml(templates: list):
     num_templates = len(templates)
@@ -567,11 +640,15 @@ templates:"""
         if "chains" in template:
             template_yaml += f"""
     chain_id: [{', '.join(template['chains'])}]"""
-        if "template_chains" in template and template["template_chains"] is not None:
+        if (
+            "template_chains" in template
+            and template["template_chains"] is not None
+        ):
             template_yaml += f"""
     template_chain_id: [{', '.join(template['template_chains'])}]"""
         template_yaml += "\n"
     return num_templates, template_yaml
+
 
 def build_constraint_yaml(constraints: list):
     num_constraints = len(constraints)
@@ -591,18 +668,24 @@ constraints:"""
         token2: [{constraint['token_2']['chain']}, {constraint['token_2']['target']}]
         max_distance: {constraint['max_distance']}"""
         elif constraint["kind"] == "pocket":
-            contacts = ", ".join([
-                f"[{chain}, {res_atm}]"
-                for chain, res_atm in constraint['contacts']])
+            contacts = ", ".join(
+                [
+                    f"[{chain}, {res_atm}]"
+                    for chain, res_atm in constraint["contacts"]
+                ]
+            )
             constraint_yaml += f"""
     - pocket:
         binder: {constraint['binder']}
         contacts: [{contacts}]
         max_distance: {constraint['max_distance']}"""
         else:
-            raise NotImplementedError(f"Unknown constraint type {constraint['kind']}.")
+            raise NotImplementedError(
+                f"Unknown constraint type {constraint['kind']}."
+            )
     constraint_yaml += "\n"
     return num_constraints, constraint_yaml
+
 
 def _features_from_yaml(
     input_yaml_str: str,
@@ -610,21 +693,13 @@ def _features_from_yaml(
 ) -> PyTree:
     if not isinstance(cache, Path):
         cache = Path(cache).expanduser()
-    out_dir_handle = (
-        TemporaryDirectory()
-    )  # this is sketchy -- we have to remember not to let this get garbage collected
+    out_dir_handle = TemporaryDirectory()
     out_dir = Path(out_dir_handle.name)
-    # dump the yaml to a file
     input_data_path = out_dir / "input.yaml"
     input_data_path.write_text(input_yaml_str)
     data = boltz_main.check_inputs(input_data_path)
-    # TODO: loading of cached MSA should happen here
-    # for each sequence, check if it is cached
-    # if so, write csv to MSA directory and add that to dictionary
-    # Process inputs
     ccd_path = cache / "ccd.pkl"
     mol_dir = cache / "mols"
-    # TODO: make sure this caches MSAs
     boltz_main.process_inputs(
         data=data,
         out_dir=out_dir,
@@ -636,7 +711,6 @@ def _features_from_yaml(
         boltz2=True,
     )
 
-    # Load processed data
     processed_dir = out_dir / "processed"
     manifest = boltz_main.Manifest.load(processed_dir / "manifest.json")
 
@@ -655,12 +729,11 @@ def _features_from_yaml(
             else None
         ),
         extra_mols_dir=(
-            (processed_dir / "mols") if (processed_dir / "mols").exists() else None
+            (processed_dir / "mols")
+            if (processed_dir / "mols").exists()
+            else None
         ),
     )
-    # TODO: caching of MSA should happen here
-    # check, if sequence is in cache. If not, try loading the MSA
-    # Create data module
     data_module = boltz_main.Boltz2InferenceDataModule(
         manifest=manifest,
         target_dir=processed.targets_dir,
@@ -673,16 +746,11 @@ def _features_from_yaml(
         override_method=None,
     )
 
-    # Load the features for the single example
     features_dict = list(data_module.predict_dataloader())[0]
-
-    # convert features to numpy arrays
-    features = {k: np.array(v) for k, v in features_dict.items() if k != "record"}
-
-    ## one-hot the MSA
+    features = {
+        k: np.array(v) for k, v in features_dict.items() if k != "record"
+    }
     features["msa"] = jax.nn.one_hot(features["msa"], const.num_tokens)
-    # fix up some dtypes
-    # features["method_feature"] = features["method_feature"].astype(np.int32)
     writer_spec = dict(
         features_dict=features_dict,
         target_dir=processed.targets_dir,
@@ -691,6 +759,7 @@ def _features_from_yaml(
     )
 
     return features, writer_spec
+
 
 # Adapted from github.com/jwohlwend/boltz/src/boltz/data/write/writer.py
 # at commit cb04aec, which is licensed under the Apache 2.0 License.
@@ -701,17 +770,8 @@ class _BoltzWriter:
         output_dir: str,
         output_format: Literal["pdb", "mmcif"] = "mmcif",
     ) -> None:
-        """Initialize the writer.
-
-        Parameters
-        ----------
-        output_dir : str
-            The directory to save the predictions.
-
-        """
         if output_format not in ["pdb", "mmcif"]:
-            msg = f"Invalid output format: {output_format}"
-            raise ValueError(msg)
+            raise ValueError(f"Invalid output format: {output_format}")
 
         self.data_dir = Path(data_dir)
         self.output_dir = Path(output_dir)
@@ -719,61 +779,42 @@ class _BoltzWriter:
         self.failed = 0
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def write(
-        self,
-        prediction: dict[str, torch.Tensor],
-        batch
-    ) -> None:
+    def write(self, prediction: dict[str, torch.Tensor], batch) -> None:
         """Write the predictions to disk."""
         if prediction["exception"]:
             self.failed += 1
             return
 
-        # Get the records
         records: list[Record] = batch["record"]
-
-        # Get the predictions
-        coords = prediction["coords"]
-        coords = coords.unsqueeze(0)
-
+        coords = prediction["coords"].unsqueeze(0)
         pad_masks = prediction["masks"]
         idx_to_rank = {i: i for i in range(len(records))}
 
-        # Iterate over the records
         for record, coord, pad_mask in zip(records, coords, pad_masks):
-            # Load the structure
             path = self.data_dir / f"{record.id}.npz"
             structure: StructureV2 = StructureV2.load(path)
 
-            # Compute chain map with masked removed, to be used later
             chain_map = {}
             for i, mask in enumerate(structure.mask):
                 if mask:
                     chain_map[len(chain_map)] = i
 
-            # Remove masked chains completely
             structure = structure.remove_invalid_chains()
 
             for model_idx in range(coord.shape[0]):
-                # Get model coord
                 model_coord = coord[model_idx]
-                # Unpad
-                coord_unpad = model_coord[pad_mask.bool()]
-                coord_unpad = coord_unpad.cpu().numpy()
+                coord_unpad = model_coord[pad_mask.bool()].cpu().numpy()
 
-                # New atom table
                 atoms = structure.atoms
                 atoms["coords"] = coord_unpad
                 atoms["is_present"] = True
-                structure: StructureV2
-                coord_unpad = [(x,) for x in coord_unpad]
-                coord_unpad = np.array(coord_unpad, dtype=Coords)
+                coord_unpad = np.array(
+                    [(x,) for x in coord_unpad], dtype=Coords
+                )
 
-                # Mew residue table
                 residues = structure.residues
                 residues["is_present"] = True
 
-                # Update the structure
                 interfaces = np.array([], dtype=Interface)
                 new_structure: StructureV2 = replace(
                     structure,
@@ -783,7 +824,6 @@ class _BoltzWriter:
                     coords=coord_unpad,
                 )
 
-                # Update chain info
                 chain_info = []
                 for chain in new_structure.chains:
                     old_chain_idx = chain_map[chain["asym_id"]]
@@ -795,40 +835,37 @@ class _BoltzWriter:
                     )
                     chain_info.append(new_chain_info)
 
-                # Save the structure
                 struct_dir = self.output_dir / record.id
                 struct_dir.mkdir(exist_ok=True)
 
-                # Get plddt's
                 plddts = None
                 if "plddt" in prediction:
                     plddts = prediction["plddt"][model_idx]
 
-                # Create path name
                 outname = f"{record.id}_model_{idx_to_rank[model_idx]}"
-
-                # Save the structure
                 if self.output_format == "pdb":
-                    path = struct_dir / f"{outname}.pdb"
-                    with path.open("w") as f:
+                    out_path = struct_dir / f"{outname}.pdb"
+                    with out_path.open("w") as f:
                         f.write(
                             to_pdb(new_structure, plddts=plddts, boltz2=True)
                         )
                 elif self.output_format == "mmcif":
-                    path = struct_dir / f"{outname}.cif"
-                    with path.open("w") as f:
+                    out_path = struct_dir / f"{outname}.cif"
+                    with out_path.open("w") as f:
                         f.write(
                             to_mmcif(new_structure, plddts=plddts, boltz2=True)
                         )
                 else:
-                    path = struct_dir / f"{outname}.npz"
-                    np.savez_compressed(path, **asdict(new_structure))
+                    out_path = struct_dir / f"{outname}.npz"
+                    np.savez_compressed(out_path, **asdict(new_structure))
 
 
 class Joltz2Writer:
     writer: _BoltzWriter
     atom_pad_mask: torch.Tensor
-    record: any
+    n_valid_atoms: int
+    n_valid_tokens: int
+    record: Any
     out_dir: str
     temp_dir_handle: TemporaryDirectory
 
@@ -843,42 +880,72 @@ class Joltz2Writer:
         self.writer = _BoltzWriter(
             data_dir=target_dir,
             output_dir=output_dir,
-            output_format="mmcif"
+            output_format="mmcif",
         )
-        self.atom_pad_mask = features_dict["atom_pad_mask"].unsqueeze(0)
+        raw_atom_mask = features_dict["atom_pad_mask"]
+        self.atom_pad_mask = raw_atom_mask.unsqueeze(0)
+        self.n_valid_atoms = int((raw_atom_mask > 0).sum().item())
+        raw_tok_mask = features_dict.get("token_pad_mask")
+        self.n_valid_tokens = (
+            int((raw_tok_mask > 0).sum().item())
+            if raw_tok_mask is not None
+            else int(features_dict["residue_index"].shape[-1])
+        )
         self.record = features_dict["record"][0]
         self.out_dir = output_dir
         self.temp_dir_handle = temp_dir_handle
 
-    def save_structure(self, path, sample_atom_coords, plddt=None, out_format="mmcif"):
+    def save_structure(
+        self, path, sample_atom_coords, plddt=None, out_format="mmcif"
+    ):
         self.writer.output_format = out_format
         confidence = torch.ones(1)
 
-        if len(sample_atom_coords.shape) == 3:
-            coords = torch.tensor(np.array(sample_atom_coords)).unsqueeze(0)
+        coords_np = np.asarray(sample_atom_coords)
+        if coords_np.ndim == 2:
+            coords = torch.tensor(coords_np).unsqueeze(0).unsqueeze(0)
+        elif coords_np.ndim == 3:
+            coords = torch.tensor(coords_np).unsqueeze(0)
         else:
-            coords = torch.tensor(np.array(sample_atom_coords))
+            coords = torch.tensor(coords_np)
+
+        num_in_atoms = coords.shape[-2]
+        if num_in_atoms == self.atom_pad_mask.shape[-1]:
+            masks = self.atom_pad_mask
+        else:
+            masks = torch.zeros((1, 1, num_in_atoms), dtype=torch.bool)
+            masks[:, :, : self.n_valid_atoms] = True
+
         pred_dict = {
             "exception": False,
             "coords": coords,
-            "masks": self.atom_pad_mask,
+            "masks": masks,
             "confidence_score": confidence,
         }
         if plddt is not None:
-            pred_dict["plddt"] = torch.tensor(np.array(plddt))
-        self.writer.write(
-            pred_dict,
-            {"record": [self.record]}
-        )
+            plddt_np = np.asarray(plddt)
+            if plddt_np.ndim == 3:
+                plddt_np = plddt_np.squeeze(0)
+            elif plddt_np.ndim == 1:
+                plddt_np = plddt_np[None, :]
+            plddt_np = plddt_np[:, : self.n_valid_tokens]
+            pred_dict["plddt"] = torch.tensor(plddt_np)
 
-        if out_format == "mmcif":
-            in_path = str((Path(self.out_dir) / self.record.id) / f"{self.record.id}_model_0.cif")
-        else:
-            in_path = str((Path(self.out_dir) / self.record.id) / f"{self.record.id}_model_0.pdb")
+        self.writer.write(pred_dict, {"record": [self.record]})
+
+        suffix = "cif" if out_format == "mmcif" else "pdb"
+        in_path = str(
+            (Path(self.out_dir) / self.record.id)
+            / f"{self.record.id}_model_0.{suffix}"
+        )
         shutil.copy(in_path, path)
 
     def save_pdb(self, path, sample_atom_coords, plddt=None):
-        self.save_structure(path, sample_atom_coords, plddt=plddt, out_format="pdb")
+        self.save_structure(
+            path, sample_atom_coords, plddt=plddt, out_format="pdb"
+        )
 
     def save_cif(self, path, sample_atom_coords, plddt=None):
-        self.save_structure(path, sample_atom_coords, plddt=plddt, out_format="mmcif")
+        self.save_structure(
+            path, sample_atom_coords, plddt=plddt, out_format="mmcif"
+        )

@@ -1,31 +1,75 @@
-"""This module implements a jax version of ProteinMPNN, adapted from ColabDesign.
-Compared to ColabDesign, this version enables dynamically choosing the order of amino acid sampling
-and allows simultaneous prediction of all masked logits without an input sequence.
-"""
-# adapted from ColabDesign
-
-import joblib
+"""JAX implementation of ProteinMPNN / SolubleMPNN adapted from ColabDesign."""
 
 import functools
+import hashlib
+import os
+
 import haiku as hk
 import jax
-import numpy as np
 import jax.numpy as jnp
+import joblib
+import numpy as np
 
 from flexcraft.data.data import DesignData
 import flexcraft.sequence.aa_codes as aas
 
 Gelu = functools.partial(jax.nn.gelu, approximate=False)
 
+VANILLA_PMPNN_SHA256: frozenset[str] = frozenset({
+    "cf9c5980389312d26e8d25699e3d1372a9563b81770b4ca04c02027dcceb27a2",
+    "7020cb9bda0c5722c7ededcfd00f8546af1510c66a44fb7acaebcaa33c1479ea",
+    "993194d9cbe9334f6c2c81bddeb1404ea831711bca8e38b591b4116060484ac3",
+    "e6b7882f9ca25c24379c29aeb9b8e78e8bcffab5699a3521fd22c50713220697",
+})
+
+
+def _sha256_file(path: str) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _verify_solmpnn_weights(params_path: str) -> None:
+    """Ensure SolubleMPNN checkpoints are not stale copies of vanilla ProteinMPNN."""
+    abs_path = os.path.abspath(str(params_path))
+    parts = os.path.normpath(abs_path).split(os.sep)
+    if "pmpnn" in parts and "solmpnn" not in parts:
+        raise RuntimeError(
+            f"SolubleMPNN requested (soluble=True), but '{params_path}' points to vanilla "
+            "ProteinMPNN weights. Use 'params/solmpnn/...' or re-run './download_params.sh'."
+        )
+    if not os.path.isfile(abs_path):
+        return
+
+    sol_digest = _sha256_file(abs_path)
+    if sol_digest in VANILLA_PMPNN_SHA256:
+        raise RuntimeError(
+            f"SolubleMPNN weight file '{params_path}' contains vanilla ProteinMPNN weights "
+            f"(SHA256 {sol_digest}). Please re-run './download_params.sh' to fetch SolubleMPNN weights."
+        )
+
+    basename = os.path.basename(abs_path)
+    candidate_pmpnn_paths = [
+        os.path.join(os.path.dirname(os.path.dirname(abs_path)), "pmpnn", basename),
+        os.path.abspath(os.path.join("params", "pmpnn", basename)),
+    ]
+    for pmpnn_path in candidate_pmpnn_paths:
+        if pmpnn_path != abs_path and os.path.isfile(pmpnn_path):
+            if _sha256_file(pmpnn_path) == sol_digest:
+                raise RuntimeError(
+                    f"SolubleMPNN weight file '{params_path}' is identical to vanilla ProteinMPNN "
+                    f"weight file '{pmpnn_path}' (SHA256 {sol_digest}). "
+                    "Please re-run './download_params.sh' to fetch SolubleMPNN weights."
+                )
+
 
 def gather_nodes(nodes, neighbor_idx):
-    # Features [B,N,C] at Neighbor indices [B,N,K] => [B,N,K,C]
-    # Flatten and expand indices per batch [B,N,K] => [B,NK] => [B,NK,C]
     neighbors_flat = neighbor_idx.reshape([neighbor_idx[None].shape[0], -1])
     neighbors_flat = jnp.tile(
         jnp.expand_dims(neighbors_flat, -1), [1, 1, nodes[None].shape[2]]
     )
-    # Gather and re-pack
     neighbor_features = jnp.take_along_axis(nodes[None], neighbors_flat, 1)
     neighbor_features = neighbor_features.reshape(
         list(neighbor_idx[None].shape[:3]) + [-1]
@@ -40,19 +84,8 @@ def cat_neighbors_nodes(h_nodes, h_neighbors, E_idx):
 
 
 def get_sep_mask(order, filled):
-    # all unfilled positions sit at max index + 1
     order = jnp.where(filled, order, order.max() + 1)
-    # allow to attend on all earlier positions
-    mask = order[:, None] > order[None, :]
-    # results in a mask like
-    # fill : f f f u u
-    # order: 0 1 2 3 3
-    # mask : 0 0 0 0 0
-    #        1 0 0 0 0
-    #        1 1 0 0 0
-    #        1 1 1 0 0 <- all unfilled positions only
-    #        1 1 1 0 0    attend to filled positions
-    return mask
+    return order[:, None] > order[None, :]
 
 
 def drop(x, rate=0.1):
@@ -91,8 +124,7 @@ class EncLayer(hk.Module):
         )
 
     def __call__(self, h_V, h_E, E_idx, mask_V=None, mask_attend=None, tie_info=None):
-        """Parallel computation of full transformer layer"""
-
+        """Parallel computation of full encoder layer."""
         h_EV = cat_neighbors_nodes(h_V, h_E, E_idx)
         h_V_expand = jnp.tile(jnp.expand_dims(h_V, -2), [1, h_EV.shape[-2], 1])
         h_EV = jnp.concatenate([h_V_expand, h_EV], -1)
@@ -102,10 +134,11 @@ class EncLayer(hk.Module):
             h_message = jnp.expand_dims(mask_attend, -1) * h_message
         dh = jnp.sum(h_message, -2) / self.scale
 
-        # tie neighbour features across tied positions
         if tie_info is not None:
             dh_weighted = dh * tie_info["tie_weights"][:, None]
-            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)[tie_info["tie_index"]]
+            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)[
+                tie_info["tie_index"]
+            ]
 
         h_V = self.norm1(h_V + drop(dh, rate=self.dropout))
 
@@ -149,9 +182,7 @@ class DecLayer(hk.Module):
         )
 
     def __call__(self, h_V, h_E, mask_V=None, mask_attend=None, tie_info=None):
-        """Parallel computation of full transformer layer"""
-
-        # Concatenate h_V_i to h_E_ij
+        """Parallel computation of full decoder layer."""
         h_V_expand = jnp.tile(jnp.expand_dims(h_V, -2), [1, h_E.shape[-2], 1])
         h_EV = jnp.concatenate([h_V_expand, h_E], -1)
 
@@ -160,14 +191,14 @@ class DecLayer(hk.Module):
             h_message = jnp.expand_dims(mask_attend, -1) * h_message
         dh = jnp.sum(h_message, -2) / self.scale
 
-        # tie neighbour features across tied positions
         if tie_info is not None:
             dh_weighted = dh * tie_info["tie_weights"][:, None]
-            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)[tie_info["tie_index"]]
-        
+            dh = jnp.zeros_like(dh).at[tie_info["tie_index"]].add(dh_weighted)[
+                tie_info["tie_index"]
+            ]
+
         h_V = self.norm1(h_V + drop(dh, rate=self.dropout))
 
-        # Position-wise feedforward
         dh = self.dense(h_V)
         h_V = self.norm2(h_V + drop(dh, rate=self.dropout))
 
@@ -186,8 +217,7 @@ class PositionWiseFeedForward(hk.Module):
 
     def __call__(self, h_V):
         h = self.act(self.W_in(h_V), approximate=False)
-        h = self.W_out(h)
-        return h
+        return self.W_out(h)
 
 
 class PositionalEncodings(hk.Module):
@@ -202,8 +232,7 @@ class PositionalEncodings(hk.Module):
             offset + self.max_relative_feature, 0, 2 * self.max_relative_feature
         ) * mask + (1 - mask) * (2 * self.max_relative_feature + 1)
         d_onehot = jax.nn.one_hot(d, 2 * self.max_relative_feature + 1 + 1)
-        E = self.linear(d_onehot)
-        return E
+        return self.linear(d_onehot)
 
 
 class ProteinFeatures(hk.Module):
@@ -217,7 +246,7 @@ class ProteinFeatures(hk.Module):
         augment_eps=0.0,
         num_chain_embeddings=16,
     ):
-        """Extract protein features"""
+        """Extract protein graph edge features and k-nearest neighbor indices."""
         super(ProteinFeatures, self).__init__()
         self.edge_features = edge_features
         self.node_features = node_features
@@ -227,7 +256,6 @@ class ProteinFeatures(hk.Module):
         self.num_positional_embeddings = num_positional_embeddings
 
         self.embeddings = PositionalEncodings(num_positional_embeddings)
-        node_in, edge_in = 6, num_positional_embeddings + num_rbf * 25
         self.edge_embedding = hk.Linear(
             edge_features, with_bias=False, name="edge_embedding"
         )
@@ -236,24 +264,17 @@ class ProteinFeatures(hk.Module):
         )
 
     def _get_edge_idx(self, X, mask, batch, eps=1e-6):
-        """get edge index
-        input: mask.shape = (...,L), X.shape = (...,L,3)
-        return: (...,L,k)
-        """
+        """Return k-nearest valid CA neighbor indices excluding masked/padded slots."""
         same_batch = batch[:, None] == batch[None, :]
-        mask_2D = mask[..., None, :] * mask[..., :, None]
-        mask_2D *= same_batch
+        mask_bool = jnp.asarray(mask) > 0
+        pair_mask = mask_bool[..., None, :] & mask_bool[..., :, None] & same_batch
         dX = X[..., None, :, :] - X[..., :, None, :]
-        D = jnp.sqrt(jnp.square(dX).sum(-1) + eps)
-        D_masked = jnp.where(mask_2D, D, D.max(-1, keepdims=True))
+        distances = jnp.sqrt(jnp.square(dX).sum(-1) + eps)
+        masked_distances = jnp.where(pair_mask, distances, jnp.inf)
         k = min(self.top_k, X.shape[-2])
-        return jax.lax.approx_min_k(D_masked, k, reduction_dimension=-1)[1]
+        return jax.lax.top_k(-masked_distances, k)[1]
 
     def _rbf(self, D):
-        """radial basis function (RBF)
-        input: (...,L,k)
-        output: (...,L,k,?)
-        """
         D_min, D_max, D_count = 2.0, 22.0, self.num_rbf
         D_mu = jnp.linspace(D_min, D_max, D_count)
         D_sigma = (D_max - D_min) / D_count
@@ -272,24 +293,17 @@ class ProteinFeatures(hk.Module):
         else:
             X = data["atom_positions"]
 
-        # autoconvert atom14 and atom24 to atom4
         if X.shape[1] in (14, 24):
             X = X[:, :4]
 
-        # get atoms
-        # N,Ca,C,O,Cb
-        Y = X.swapaxes(0, 1)  # (length, atoms, 3) -> (atoms, length, 3)
+        Y = X.swapaxes(0, 1)
         if Y.shape[0] == 4:
-            # add Cb
             b, c = (Y[1] - Y[0]), (Y[2] - Y[1])
             Cb = -0.58273431 * jnp.cross(b, c) + 0.56802827 * b - 0.54067466 * c + Y[1]
             Y = jnp.concatenate([Y, Cb[None]], 0)
 
-        # gather edge features
-        # get edge indices (based on ca-ca distances)
         neighbours = self._get_edge_idx(Y[1], data["mask"], data["batch_index"])
 
-        # rbf encode distances between atoms
         edges = jnp.array(
             [
                 [1, 1],
@@ -323,22 +337,20 @@ class ProteinFeatures(hk.Module):
         RBF_all = RBF_all.transpose((1, 2, 0, 3))
         RBF_all = RBF_all.reshape(RBF_all.shape[:-2] + (-1,))
 
-        ##########################
-        # position embedding
-        ##########################
-        # residue index offset
-        if "offset" not in data:
-            data["offset"] = data["residue_index"][:, None] - data["residue_index"][None, :]
-        offset = jnp.take_along_axis(data["offset"], neighbours, 1)
+        offset = data.get("offset")
+        if offset is None:
+            offset = data["residue_index"][:, None] - data["residue_index"][None, :]
+        offset = jnp.take_along_axis(offset, neighbours, 1)
 
-        # chain index offset
-        E_chains = (data["chain_index"][:, None] == data["chain_index"][None, :]).astype(int)
-        E_chains = jnp.take_along_axis(E_chains, neighbours, 1)
+        valid_chain = data["chain_index"] >= 0
+        same_chain = (
+            (data["chain_index"][:, None] == data["chain_index"][None, :])
+            & valid_chain[:, None]
+            & valid_chain[None, :]
+        ).astype(jnp.int32)
+        E_chains = jnp.take_along_axis(same_chain, neighbours, 1)
         E_positional = self.embeddings(offset, E_chains)
 
-        ##########################
-        # define edges
-        ##########################
         E = jnp.concatenate((E_positional, RBF_all), -1)
         E = self.edge_embedding(E)
         E = self.norm_edges(E)
@@ -384,14 +396,12 @@ class ProteinMPNN(hk.Module):
     ):
         super(ProteinMPNN, self).__init__(name="protein_mpnn")
 
-        # Hyperparameters
         self.node_features = node_features
         self.edge_features = edge_features
         self.hidden_dim = hidden_dim
         self.tie_messages = tie_messages
         self.scale_bias = scale_bias
 
-        # Featurization layers
         self.features = ProteinFeatures(
             edge_features, node_features, top_k=k_neighbors, augment_eps=augment_eps
         )
@@ -399,13 +409,11 @@ class ProteinMPNN(hk.Module):
         self.W_e = hk.Linear(hidden_dim, with_bias=True, name="W_e")
         self.W_s = EmbedToken(vocab_size=vocab, embed_dim=hidden_dim)
 
-        # Encoder layers
         self.encoder_layers = [
             EncLayer(hidden_dim, hidden_dim * 2, dropout=dropout, name="enc" + str(i))
             for i in range(num_encoder_layers)
         ]
 
-        # Decoder layers
         self.decoder_layers = [
             DecLayer(hidden_dim, hidden_dim * 3, dropout=dropout, name="dec" + str(i))
             for i in range(num_decoder_layers)
@@ -414,33 +422,38 @@ class ProteinMPNN(hk.Module):
 
     def __call__(self, data):
         L = data["atom_positions"].shape[0]
-
-        # prepare node and edge embeddings
         E, neighbours = self.features(data)
         local = jnp.zeros((E.shape[0], E.shape[-1]))
         pair = self.W_e(E)
 
-        # tie messages
         tie_info = None
         if self.tie_messages and "tie_index" in data:
             tie_info = dict(tie_index=data["tie_index"], tie_weights=data["tie_weights"])
 
-        # encoder layers
-        mask_attend = jnp.take_along_axis(
-            data["mask"][:, None] * data["mask"][None, :], neighbours, 1
+        valid_mask = jnp.asarray(data["mask"]) > 0
+        same_batch = data["batch_index"][:, None] == data["batch_index"][None, :]
+        pair_mask_2d = (valid_mask[:, None] & valid_mask[None, :] & same_batch).astype(
+            local.dtype
         )
+        pair_mask_attend = jnp.take_along_axis(pair_mask_2d, neighbours, 1)
+
         for layer in self.encoder_layers:
-            local, pair = layer(local, pair, neighbours,
-                                data["mask"], mask_attend,
-                                tie_info=tie_info)
+            local, pair = layer(
+                local,
+                pair,
+                neighbours,
+                data["mask"],
+                pair_mask_attend,
+                tie_info=tie_info,
+            )
         h_V_prev = local
 
         def step(x, order, filled):
             autoregressive_mask = get_sep_mask(order, filled)
-            mask_attend = jnp.take_along_axis(autoregressive_mask, neighbours, 1)
+            ar_attend = jnp.take_along_axis(autoregressive_mask, neighbours, 1) * pair_mask_attend
             mask_1D = data["mask"][:, None]
-            mask_bw = mask_1D * mask_attend
-            mask_fw = mask_1D * (1 - mask_attend)
+            mask_bw = mask_1D * ar_attend
+            mask_fw = mask_1D * (1 - ar_attend) * pair_mask_attend
 
             local = h_V_prev
             h_EX_encoder = cat_neighbors_nodes(jnp.zeros_like(local), pair, neighbours)
@@ -448,13 +461,17 @@ class ProteinMPNN(hk.Module):
             h_EXV_encoder = mask_fw[..., None] * h_EXV_encoder
             h_ES = cat_neighbors_nodes(x["seq"], pair, neighbours)
 
-            # decoder layers
             for l, layer in enumerate(self.decoder_layers):
                 local = x["local"][l]
                 h_ESV_decoder = cat_neighbors_nodes(local, h_ES, neighbours)
                 h_ESV = mask_bw[..., None] * h_ESV_decoder + h_EXV_encoder
-                local = layer(local, h_ESV, mask_V=data["mask"], tie_info=tie_info)
-                # update
+                local = layer(
+                    local,
+                    h_ESV,
+                    mask_V=data["mask"],
+                    mask_attend=pair_mask_attend,
+                    tie_info=tie_info,
+                )
                 x["local"] = x["local"].at[l + 1].set(local)
 
             out_bias = 0
@@ -462,14 +479,11 @@ class ProteinMPNN(hk.Module):
                 bias = self.W_out.params_dict()["b"]
                 out_bias = -bias + self.scale_bias * bias
             logits = jax.nn.log_softmax(self.W_out(local) + out_bias, axis=-1)
-            # set logits at unfilled positions
-            x["logits"] = logits#jnp.where(filled[..., None], x["logits"], logits)
-
+            x["logits"] = logits
             return x
 
-        # initial values
         sequence_one_hot = jax.nn.one_hot(data["aa"], 21, axis=-1)
-        filled = data["aa"] != 20
+        filled = (data["aa"] != 20) & valid_mask
         X = {
             "seq": jnp.where(filled[:, None], self.W_s(sequence_one_hot), 0),
             "local": jnp.array(
@@ -479,13 +493,7 @@ class ProteinMPNN(hk.Module):
             "logits": jnp.zeros((L, 21)),
         }
 
-        # scan over decoding order
-        # sample random decoding order in each step for filled positions
-        # unfilled positions cannot attend to each other
         order = jax.random.permutation(hk.next_rng_key(), data["aa"].shape[0])
-        t = order
-        if t.ndim == 1:
-            t = t[:, None]
         X = step(X, order, filled)
         ent = jnp.sum(-jnp.exp(X["logits"]) * X["logits"], axis=-1)
         var_ent = jnp.sum(
@@ -495,15 +503,17 @@ class ProteinMPNN(hk.Module):
         return {"aa": X["aa"], "logits": X["logits"], "ent": ent, "var_ent": var_ent}
 
     def encode(self, data):
-        # prepare node and edge embeddings
+        data = dict(data.to_dict() if isinstance(data, DesignData) else data)
         E, neighbours = self.features(data)
         local = jnp.zeros((E.shape[0], E.shape[-1]))
         pair = self.W_e(E)
 
-        # encoder layers
-        mask_attend = jnp.take_along_axis(
-            data["mask"][:, None] * data["mask"][None, :], neighbours, 1
+        valid_mask = jnp.asarray(data["mask"]) > 0
+        same_batch = data["batch_index"][:, None] == data["batch_index"][None, :]
+        pair_mask_2d = (valid_mask[:, None] & valid_mask[None, :] & same_batch).astype(
+            local.dtype
         )
+        mask_attend = jnp.take_along_axis(pair_mask_2d, neighbours, 1)
         for layer in self.encoder_layers:
             local, pair = layer(local, pair, neighbours, data["mask"], mask_attend)
         data["local"] = local
@@ -514,16 +524,28 @@ class ProteinMPNN(hk.Module):
 
     def decode(self, data):
         neighbours = data["neighbours"]
-        filled = data["aa"] != 20
+        valid_mask = jnp.asarray(data["mask"]) > 0
+        filled = (data["aa"] != 20) & valid_mask
         order = data["order"]
+        same_batch = (
+            data["batch_index"][:, None] == data["batch_index"][None, :]
+            if "batch_index" in data
+            else jnp.ones((filled.shape[0], filled.shape[0]), dtype=jnp.bool_)
+        )
+        pair_mask_2d = (valid_mask[:, None] & valid_mask[None, :] & same_batch).astype(
+            jnp.float32
+        )
+        pair_mask_attend = jnp.take_along_axis(pair_mask_2d, neighbours, 1)
+
         ar_mask = get_sep_mask(order, filled)
-        mask_attend = jnp.take_along_axis(ar_mask, neighbours, 1)
+        mask_attend = jnp.take_along_axis(ar_mask, neighbours, 1) * pair_mask_attend
         mask_1D = data["mask"][:, None]
         mask_bw = mask_1D * mask_attend
-        mask_fw = mask_1D * (1 - mask_attend)
+        mask_fw = mask_1D * (1 - mask_attend) * pair_mask_attend
 
-        L = filled.shape[0]
-        sequence_one_hot = jax.nn.one_hot(data["aa"], 20, axis=-1)
+        h_V = data["local"]
+        h_E = data["pair"]
+        sequence_one_hot = jax.nn.one_hot(data["aa"], 21, axis=-1)
         x = {
             "seq": jnp.where(filled[:, None], self.W_s(sequence_one_hot), 0),
             "local": jnp.array(
@@ -533,34 +555,49 @@ class ProteinMPNN(hk.Module):
             "logits": data["logits"],
         }
 
-        h_V = data["local"]
-        h_E = data["pair"]
         h_EX_encoder = cat_neighbors_nodes(jnp.zeros_like(h_V), h_E, neighbours)
         h_EXV_encoder = cat_neighbors_nodes(h_V, h_EX_encoder, neighbours)
         h_EXV_encoder = mask_fw[..., None] * h_EXV_encoder
         h_ES = cat_neighbors_nodes(x["seq"], h_E, neighbours)
 
-        # decoder layers
         for l, layer in enumerate(self.decoder_layers):
             h_V = x["local"][l]
             h_ESV_decoder = cat_neighbors_nodes(h_V, h_ES, neighbours)
             h_ESV = mask_bw[..., None] * h_ESV_decoder + h_EXV_encoder
-            h_V = layer(h_V, h_ESV, mask_V=data["mask"])
-            # update
+            h_V = layer(h_V, h_ESV, mask_V=data["mask"], mask_attend=pair_mask_attend)
             x["local"] = x["local"].at[l + 1].set(h_V)
 
-        logits = jax.nn.log_softmax(self.W_out(h_V), axis=-1)
-        logits = jnp.where(filled[..., None], x["logits"], logits)
-
-        return logits
+        out_bias = 0
+        if self.scale_bias is not None:
+            bias = self.W_out.params_dict()["b"]
+            out_bias = -bias + self.scale_bias * bias
+        logits = jax.nn.log_softmax(self.W_out(h_V) + out_bias, axis=-1)
+        return jnp.where(filled[..., None], x["logits"], logits)
 
 
 def load_params(params_path):
     return joblib.load(params_path)
 
 
-def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scale_bias=None,
-               split_params=False, standard_aa_code=False):
+def make_pmpnn(
+    params_path,
+    num_neighbours=48,
+    eps=0.0,
+    tie_messages=False,
+    scale_bias=None,
+    split_params=False,
+    standard_aa_code=False,
+    soluble: bool | None = None,
+):
+    """Build a Haiku-transformed ProteinMPNN or SolubleMPNN callable."""
+    is_soluble = (
+        soluble
+        if soluble is not None
+        else ("solmpnn" in os.path.normpath(str(params_path)).split(os.sep))
+    )
+    if is_soluble:
+        _verify_solmpnn_weights(params_path)
+
     config = {
         "num_letters": 21,
         "node_features": 128,
@@ -572,15 +609,14 @@ def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scal
         "k_neighbors": num_neighbours,
         "dropout": 0,
         "tie_messages": tie_messages,
-        "scale_bias": scale_bias
+        "scale_bias": scale_bias,
     }
 
     def inner(x):
+        data = dict(x.to_dict() if isinstance(x, DesignData) else x)
         if standard_aa_code:
-            if isinstance(x, DesignData):
-                x = x.to_dict()
-            x["aa"] = aas.translate(x["aa"], aas.AF2_CODE, aas.PMPNN_CODE)
-        return ProteinMPNN(**config)(x)
+            data["aa"] = aas.translate(data["aa"], aas.AF2_CODE, aas.PMPNN_CODE)
+        return ProteinMPNN(**config)(data)
 
     run_pmpnn = hk.transform(inner).apply
     params = load_params(params_path)["model_state_dict"]
@@ -588,40 +624,55 @@ def make_pmpnn(params_path, num_neighbours=48, eps=0.0, tie_messages=False, scal
         return run_pmpnn, params
     return lambda k, d: run_pmpnn(params, k, d)
 
+
 def batch_mpnn(mpnn):
     def _mpnn_map(params, key, data):
         if len(data["atom_positions"].shape) == 4:
             num_samples = data["atom_positions"].shape[0]
-            # replicate all un-batched inputs
-            xx = {
-                key: jnp.repeat(data[key][None, :], num_samples, axis=0)
-                for key in ["atom_mask", "mask", "aa",
-                            "residue_index", "chain_index", "batch_index"]
-            }
-            # add in the batched atom positions
-            xx["atom_positions"] = data["atom_positions"]
-            # split keys across batch
+            base_keys = [
+                "atom_mask",
+                "mask",
+                "aa",
+                "residue_index",
+                "chain_index",
+                "batch_index",
+            ]
+            for extra_key in ("tie_index", "tie_weights"):
+                if extra_key in data:
+                    base_keys.append(extra_key)
+            batched_inputs = {}
+            for field_key in base_keys:
+                field_val = data[field_key]
+                expected_unbatched_ndim = 2 if field_key == "atom_mask" else 1
+                if field_val.ndim == expected_unbatched_ndim:
+                    batched_inputs[field_key] = jnp.repeat(
+                        field_val[None, :], num_samples, axis=0
+                    )
+                else:
+                    batched_inputs[field_key] = field_val
+            batched_inputs["atom_positions"] = data["atom_positions"]
             keys = jax.random.split(key, num_samples)
-            # vmap the ProteinMPNN
-            return jax.vmap(mpnn, (None, 0, 0), 0)(params, keys, xx)
-        else:
-            return mpnn(params, key, data)
+            return jax.vmap(mpnn, (None, 0, 0), 0)(params, keys, batched_inputs)
+        return mpnn(params, key, data)
+
     return _mpnn_map
 
+
 def sample_minent(mpnn, key, data):
+    data = dict(data.to_dict() if isinstance(data, DesignData) else data)
     if "aa" not in data:
         data["aa"] = jnp.full_like(data["residue_index"], 20)
     if "order" not in data:
         data["order"] = jnp.zeros_like(data["aa"])
     data["order"] = jnp.zeros_like(data["order"])
-    while (data["aa"] == 20).any():
-        # run MPNN on data
+    valid_mask = jnp.asarray(data["mask"], dtype=jnp.bool_) if "mask" in data else jnp.ones_like(data["aa"], dtype=jnp.bool_)
+    while ((data["aa"] == 20) & valid_mask).any():
         res = mpnn(key, data)
         logits = res["logits"]
-        filled = data["aa"] != 20
+        filled = (data["aa"] != 20) | (~valid_mask)
         entropy = jnp.where(filled, jnp.inf, res["ent"])
         next_pos = jnp.argmin(entropy)
         sampled = jnp.argmax(logits[next_pos])
         data["aa"] = data["aa"].at[next_pos].set(sampled)
-        data["order"] = data["order"].at[next_pos].set(np.max(data["order"] + 1))
+        data["order"] = data["order"].at[next_pos].set(jnp.max(data["order"] + 1))
     return data

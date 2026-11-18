@@ -291,13 +291,11 @@ for peptides, assembly in [(["S" * opt.peptide_length] * opt.peptide_count, opt.
                 aa=sequence, mask=jnp.ones_like(sequence, dtype=jnp.bool_))
             # run AF2 filter
             af_input = AFInput.from_data(pmpnn_result).add_guess(pmpnn_result)
-            af2_result: AFResult = af2(af2_params, key(), af_input)
+            af2_result: AFResult = af2(af2_params, key(), af_input).unpad()
             plddt = af2_result.plddt
             pae = af2_result.pae
             if opt.mask_motif_plddt == "True":
-                print("masking")
                 mean_plddt = plddt[~has_motif].mean()
-                print(mean_plddt, plddt.mean())
                 mean_pae = pae[~has_motif][:, ~has_motif].mean()
             else:
                 mean_plddt = plddt.mean()

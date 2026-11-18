@@ -354,7 +354,7 @@ for motif, assembly in motif_paths:
                         atom_mask=data["motif_mask"],
                         aa=data["motif_aa"]), where=has_motif,
                     template_sidechains=True)
-            af2_result: AFResult = af2(af2_params, key(), af_input)
+            af2_result: AFResult = af2(af2_params, key(), af_input).unpad()
             plddt = af2_result.plddt
             pae = af2_result.pae
             if opt.mask_motif_plddt == "True":

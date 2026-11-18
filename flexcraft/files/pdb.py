@@ -1,92 +1,111 @@
-"""This module provides classes for reading and writing PDB files."""
+"""Classes for reading and writing PDB files."""
 
 import os
+from pathlib import Path
 import shutil
-import time
-import uuid
+import tempfile
 
-from flexcraft.utils.io import load_pdb
+import jax
+
 from flexcraft.data.data import DesignData
+from flexcraft.utils.io import load_pdb
+
 
 class PDBFile:
-    """Manages input or output PDB files, converting back and forth between PDB and DesignData formats.
+    """Manage input/output PDB files backed by canonical atom24 ``DesignData``."""
 
-    Args:
-        data: optional DesignData object. If `data`and `path` are both provided, writes `data` to `path`.
-        path: path to an input or output PDB file. if `data` is not provided, reads the PDB file.
-        prefix: prefix string for creating temporary PDB files, if `path` is not provided.
-        tmpdir: path to a temporary directory. If not provided, this is set to "tmp/".
-    """
-    def __init__(self, data: DesignData | None=None, path=None, prefix="", tmpdir=None,
-                 temporary=False):
+    def __init__(
+        self,
+        data: DesignData | dict | str | os.PathLike | None = None,
+        path: str | os.PathLike | None = None,
+        prefix: str = "",
+        tmpdir: str | None = None,
+        temporary: bool = False,
+    ):
         self.prefix = prefix
         self.temporary = temporary
-        if tmpdir is None:
-            tmpdir = "tmp/"
         self.tmpdir = tmpdir
+        self.path = None
+        self.writable = False
+        self.data = None
+
+        if isinstance(data, (str, os.PathLike)) and path is None:
+            path = os.fspath(data)
+            data = None
+
         if path is None:
             path = self.get_tmp_path(prefix=prefix, tmpdir=tmpdir)
-        self.path = path
-        self.writable = False
-        if data is None:
-            data = load_pdb(path)
         else:
+            path = os.fspath(path)
+        self.path = path
+
+        if data is None:
+            loaded = load_pdb(self.path)
+            self.data = loaded
+        else:
+            if isinstance(data, dict):
+                data = DesignData.from_dict(data)
+            if "mask" in data.data and not any(
+                isinstance(value, jax.core.Tracer) for value in data.data.values()
+            ):
+                data = data.unpad()
             self.writable = True
-            data.save_pdb(path)
-        self.data = data
+            data.save_pdb(self.path)
+            self.data = data
 
     @staticmethod
-    def get_tmp_path(prefix="", tmpdir="tmp/"):
-        name = str(uuid.uuid4())
-        if prefix:
-            name = f"{prefix}_{name}"
-        return f"{tmpdir}/{name}.pdb"
+    def get_tmp_path(prefix: str = "", tmpdir: str | None = None) -> str:
+        """Create a unique temporary ``.pdb`` file in ``tmpdir`` (or system temp dir)."""
+        if tmpdir is not None:
+            os.makedirs(tmpdir, exist_ok=True)
+        file_prefix = f"{prefix}_" if prefix else "flexcraft_"
+        with tempfile.NamedTemporaryFile(
+            mode="wt", prefix=file_prefix, suffix=".pdb", dir=tmpdir, delete=False
+        ) as tmp_file:
+            return tmp_file.name
 
-    def to_data(self):
-        """Convert PDB file to DesignData."""
+    def to_data(self) -> DesignData:
+        """Return the underlying ``DesignData`` object."""
         return self.data
 
-    def clean(self):
-        """Clean PDB file, removing all non-structure information."""
-        if not os.path.exists(self.tmpdir):
-            os.makedirs(self.tmpdir)
-        tmp_path = self.get_tmp_path(
-            prefix=self.prefix, tmpdir=self.tmpdir)
-        relevant_tags = ('ATOM', 'END', 'HETATM', 'LINK', 'MODEL', 'TER')
-        with open(self.path, 'r') as f_in, open(tmp_path, 'wt') as f_out:
+    def clean(self) -> "PDBFile":
+        """Strip non-coordinate records from the underlying PDB file."""
+        tmp_path = self.get_tmp_path(prefix=self.prefix, tmpdir=self.tmpdir)
+        relevant_tags = ("ATOM", "END", "HETATM", "LINK", "MODEL", "TER")
+        with open(self.path, "rt") as f_in, open(tmp_path, "wt") as f_out:
             for line in f_in:
                 if line.startswith(relevant_tags):
                     f_out.write(line)
         shutil.move(tmp_path, self.path)
         return self
 
-    def reload(self):
-        """Reloads the underlying PDB file from disk."""
+    def reload(self) -> DesignData:
+        """Reload the underlying PDB file from disk."""
         if self.path is not None:
             self.data = load_pdb(self.path)
             return self.data
         raise ValueError("PDBFile is not attached to any path. Did you .remove it?")
 
-    def remove(self):
-        """Removes the underlying PDB file and returns a DesignData object containing its contents."""
-        os.remove(self.path)
-        self.path = None
+    def remove(self) -> DesignData:
+        """Delete the underlying PDB file and return its ``DesignData``."""
+        if self.path is not None:
+            Path(self.path).unlink(missing_ok=True)
+            self.path = None
         return self.data
 
     def __getitem__(self, index):
-        """Index into the underlying DesignData object."""
+        """Index into the underlying ``DesignData`` object."""
         return self.data[index]
 
     def __setitem__(self, index, value):
-        raise NotImplementedError(
-            "PDB-file data is immutable.")
+        raise NotImplementedError("PDB-file data is immutable.")
 
     def __iter__(self):
         return iter(self.data)
-    
+
     def __del__(self):
-        if self.temporary:
-            os.remove(self.path)
+        if getattr(self, "temporary", False) and getattr(self, "path", None) is not None:
+            Path(self.path).unlink(missing_ok=True)
             self.path = None
 
     def keys(self):

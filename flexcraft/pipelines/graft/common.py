@@ -231,7 +231,7 @@ def extract_motif(pdbs, pdb_names: list, segment_defn):
         if "center_time" in segment_defn:
             center_time = segment_defn["center_time"]
         center = np.repeat(np.array(
-            center, dtype=np.float32)[None], axis=0)
+            center, dtype=np.float32)[None], length, axis=0)
         center_group = np.full((length,), center_group, dtype=np.int32)
         center_time = np.full((length,), center_time, dtype=np.float32)
         use_center = np.ones((length,), dtype=np.bool_)

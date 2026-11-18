@@ -1,5 +1,3 @@
-from collections import defaultdict
-
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -8,10 +6,22 @@ from flexcraft.files.pdb import PDBFile
 from flexcraft.data.data import DesignData
 from flexcraft.structure.af import (
     AFInput, AFResult, get_model_haiku_params, model_config, make_af2, make_predict)
-from flexcraft.rosetta.relax import fastrelax
-from flexcraft.rosetta.interface_analyzer import score_interface
-from salad.modules.utils.geometry import index_align
 from flexcraft.structure.metrics import RMSD
+
+
+def _load_rosetta_helpers():
+    """Lazily import PyRosetta relaxation and interface scoring helpers."""
+    try:
+        import pyrosetta  # noqa: F401
+        from flexcraft.rosetta.relax import fastrelax
+        from flexcraft.rosetta.interface_analyzer import score_interface
+    except ImportError as exc:
+        raise ImportError(
+            "PyRosetta is required for BindCraft Rosetta relaxation and interface scoring. "
+            "Install PyRosetta into `.venv` and preserve it across syncs with "
+            "`uv sync --inexact` (or run commands with `uv run --no-sync`)."
+        ) from exc
+    return fastrelax, score_interface
 
 class BindCraftProperties:
     def __init__(self, path, key, af_parameter_path, filter=None, 
@@ -47,11 +57,12 @@ class BindCraftProperties:
         self.filter=xfilter
     
     def __call__(self, name, design: DesignData, is_target: jnp.ndarray):
-        # c = self.config
         af_input = (AFInput
                     .from_data(design)
                     .add_template(design, where=is_target))
-        num_chains = len(np.unique(design["chain_index"]))
+        valid_chains = np.asarray(design["chain_index"])
+        valid_chains = valid_chains[valid_chains >= 0]
+        num_chains = max(1, len(np.unique(valid_chains)))
         af_input = af_input.block_diagonal(num_sequences=num_chains)
         if self.use_guess:
             af_input = af_input.add_guess(design)
@@ -78,19 +89,29 @@ class BindCraftProperties:
                            design: DesignData,
                            is_target: jnp.ndarray,) -> dict:
         result = dict()
-        is_binder = ~is_target
-        pair_is_binder = is_binder[:, None] * is_binder[None, :]
-        af_result.inputs["chain_index"] = is_target.astype(jnp.int32)
-        # AlphaFold 2 metrics
-        result["Binder_pLDDT"] = (is_binder * af_result.plddt).sum() / jnp.maximum(is_binder.sum(), 1)
-        result["pLDDT"] = af_result.plddt.mean()
-        result["Binder_pTM"] = ((pair_is_binder * af_result.ptm_matrix(is_binder.sum())).sum(axis=1) / jnp.maximum(pair_is_binder.sum(), 1)).max(axis=0)
+        pad_mask = jnp.asarray(af_result.token_pad_mask, dtype=jnp.bool_)
+        is_target_arr = jnp.asarray(is_target, dtype=jnp.bool_)
+        if is_target_arr.shape[0] < pad_mask.shape[0]:
+            is_target_arr = jnp.pad(
+                is_target_arr,
+                (0, pad_mask.shape[0] - is_target_arr.shape[0]),
+                constant_values=False,
+            )
+        valid_binder = (~is_target_arr) & pad_mask
+        binary_asym_id = jnp.where(pad_mask, valid_binder.astype(jnp.int32), -1)
+        af_result.inputs = dict(af_result.inputs)
+        af_result.inputs["asym_id"] = binary_asym_id
+        if "chain_index" in af_result.inputs:
+            af_result.inputs["chain_index"] = binary_asym_id
+        # AlphaFold 2 metrics (complex pTM evaluated on af_result.ptm)
+        result["Binder_pLDDT"] = af_result.index_plddt(valid_binder)
+        result["pLDDT"] = af_result.mean_plddt
+        result["Binder_pTM"] = af_result.index_ptm(valid_binder)
         result["pTM"] = af_result.ptm
         result["i_pTM"] = af_result.iptm
-        result["pAE"] = af_result.pae.mean()
-        result["Binder_pAE"] = (af_result.pae * pair_is_binder).sum() / jnp.maximum(pair_is_binder.sum(), 1)
+        result["pAE"] = af_result.mean_pae
+        result["Binder_pAE"] = af_result.chain_pae(1, 1)
         result["i_pAE"] = af_result.ipae
-        # FIXME if pass, relax the af2 structure. Else, continue
         if result["i_pAE"] >= self.ipae_shortcut_threshold:
             result.update({
                 'Binder_Energy_Score': np.nan,
@@ -111,20 +132,27 @@ class BindCraftProperties:
             })
             return result
         # Rosetta relax the af2 structure
-        relaxed: PDBFile = fastrelax(af_result.to_data(), f"{self.path}/{self.relaxed_name}/{name}.pdb")
-        relaxed_data = relaxed.to_data()
-        if_scores, if_aa = score_interface(relaxed, is_target)
+        fastrelax, score_interface = _load_rosetta_helpers()
+        unpadded_design = design.unpad()
+        af_data = af_result.unpad().to_data().update(
+            chain_index=unpadded_design["chain_index"]
+        )
+        is_target_host = np.asarray(is_target_arr[np.asarray(pad_mask, dtype=bool)], dtype=bool)
+        is_binder_host = ~is_target_host
+        relaxed: PDBFile = fastrelax(af_data, f"{self.path}/{self.relaxed_name}/{name}.pdb")
+        relaxed_data = relaxed.to_data().unpad()
+        if_scores, if_aa = score_interface(relaxed, is_target_host)
         # alignment / RMSD
         result["RMSD"] = RMSD()(
-            relaxed_data, design,
-            design["batch_index"], design["mask"])
-        relaxed_target = relaxed_data[is_target]
-        design_target = design[is_target]
+            relaxed_data, unpadded_design,
+            unpadded_design["batch_index"], unpadded_design["mask"])
+        relaxed_target = relaxed_data[is_target_host]
+        design_target = unpadded_design[is_target_host]
         result["Target_RMSD"] = RMSD()(
             relaxed_target, design_target,
             design_target["batch_index"], design_target["mask"])
-        relaxed_binder = relaxed_data[is_binder]
-        design_binder = design[is_binder]
+        relaxed_binder = relaxed_data[is_binder_host]
+        design_binder = unpadded_design[is_binder_host]
         result["Binder_RMSD"] = RMSD()(
             relaxed_binder, design_binder,
             design_binder["batch_index"], design_binder["mask"])

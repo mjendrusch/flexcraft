@@ -100,12 +100,12 @@ def protein_hunter(key, cycles=5):
         init_sequence = _init_sequence()
         binder_sequence = aas.decode(np.argmax(init_sequence, axis=-1), aas.AF2_CODE)
         #joltz_input = joltz_input.set_aa(init_sequence)
-        result: JoltzResult = hunter_step(joltz_params, key(), joltz_input)
+        result: JoltzResult = hunter_step(joltz_params, key(), joltz_input).unpad()
         pred = JoltzPrediction(data=result.data, writer=joltz_writer)
         if report is not None:
             report(0, binder_sequence, pred)
         for c in range(cycles - 1):
-            binder_sequence = _pmpnn(result.to_data())
+            binder_sequence = _pmpnn(result.to_data().unpad())
             spec = (
                 JoltzSpec()
                 .add_protein(binder_sequence)
@@ -118,7 +118,7 @@ def protein_hunter(key, cycles=5):
             joltz_input, joltz_writer = spec.to_input(pad=True, cache=opt.boltz_path)
             if use_msa:
                 joltz_input = joltz_input.inherit_msa(init_input)
-            result: JoltzResult = hunter_step(joltz_params, key(), joltz_input)
+            result = hunter_step(joltz_params, key(), joltz_input).unpad()
             pred = JoltzPrediction(data=result.data, writer=joltz_writer)
             if report is not None:
                 report(c + 1, binder_sequence, pred)
@@ -127,13 +127,16 @@ def protein_hunter(key, cycles=5):
 
 def _report_trajectory(target: str, index: int, writer: ScoreCSV, start_step=0):
     def _report(step: int, sequence: str, pred: JoltzPrediction):
-        result = pred.result
+        result = pred.result.unpad()
+        pad_mask = result.token_pad_mask
+        is_binder = (np.arange(pad_mask.shape[0]) < binder_length) & np.asarray(pad_mask, dtype=bool)
+        binder_plddt = float(result.index_plddt(is_binder).mean())
         line_info = dict(
             target=target,
             attempt=index, step=start_step + step,
             sequence=sequence,
-            plddt=result.plddt[:binder_length].mean(),
-            iptm=result.iptm)
+            plddt=binder_plddt,
+            iptm=float(result.iptm.max()))
         pred.save_pdb(f"{opt.out_path}/attempts/{target}_{index}_{step}.pdb")
         writer.write_line(line_info)
     return _report
