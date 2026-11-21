@@ -118,19 +118,18 @@ def fastrelax(
 
     # With task_operations left unset, fast_relax builds its default packer task:
     # restrict-to-repacking with Dunbrack + fixed-AA + include-current rotamer samplers.
-    try:
-        relaxed = tmol.fast_relax(
-            pose_stack,
-            sfxn,
-            palette,
-            move_map,
-            fold_forest,
-            num_repeats=int(num_repeats),
-            ramp_constraints=bool(constrain_to_start),
-        )
-    finally:
-        if constrain_to_start:
-            sfxn.set_weight(tmol.ScoreType.constraint, 0.0)
+    # fast_relax(ramp_constraints=True) restores the input constraint weight itself, and
+    # sfxn is local to this call, so no post-relax weight reset is needed (and set_weight
+    # to 0 crashes some tmol releases).
+    relaxed = tmol.fast_relax(
+        pose_stack,
+        sfxn,
+        palette,
+        move_map,
+        fold_forest,
+        num_repeats=int(num_repeats),
+        ramp_constraints=bool(constrain_to_start),
+    )
 
     tmol.write_pose_stack_pdb(relaxed, relaxed_pdb_path)
 
