@@ -42,10 +42,7 @@ def _require_tmol():
 def _select_device(device, torch):
     if device is not None:
         return torch.device(device)
-    import tmol
-    if torch.cuda.is_available() and tmol.has_cuda():
-        return torch.device("cuda")
-    return torch.device("cpu")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def _ca_coords_and_bfactors(pdb_path):
@@ -92,11 +89,6 @@ def fastrelax(
     """
     tmol, torch = _require_tmol()
     from tmol.pack import PackerPalette
-    from tmol.pack.rotamer.single_residue_kinematic_building_block import (
-        FixedAAChiSampler,
-    )
-    from tmol.pack.rotamer.dunbrack.dunbrack_chi_sampler import DunbrackChiSampler
-    from tmol.pack.rotamer.current_sampler import IncludeCurrentSampler
 
     dev = _select_device(device, torch)
 
@@ -119,19 +111,13 @@ def fastrelax(
         sfxn.set_weight(tmol.ScoreType.constraint, 1.0)
 
     move_map = tmol.MoveMap.from_pose_stack(pose_stack)
-    move_map.move_all_mc = True
-    move_map.move_all_sc = True
+    move_map.move_all_jumps = True
+    move_map.move_all_named_torsions = True
     palette = PackerPalette()
     fold_forest = tmol.FoldForest.reasonable_fold_forest(pose_stack)
-    dun = DunbrackChiSampler.from_database(sfxn._param_db.scoring_db.dun, dev)
 
-    def task_op(task):
-        task.restrict_to_repacking()
-        task.or_bump_check(True)
-        task.add_conformer_sampler(dun)
-        task.add_conformer_sampler(FixedAAChiSampler())
-        task.add_conformer_sampler(IncludeCurrentSampler())
-
+    # With task_operations left unset, fast_relax builds its default packer task:
+    # restrict-to-repacking with Dunbrack + fixed-AA + include-current rotamer samplers.
     try:
         relaxed = tmol.fast_relax(
             pose_stack,
@@ -139,7 +125,6 @@ def fastrelax(
             palette,
             move_map,
             fold_forest,
-            task_operations=[task_op],
             num_repeats=int(num_repeats),
             ramp_constraints=bool(constrain_to_start),
         )
